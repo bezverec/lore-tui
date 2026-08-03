@@ -1,0 +1,27 @@
+[package]
+name = "lore-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for Lore, the open source version control system from Epic Games"
+repository = "https://github.com/bezverec/lore-tui"
+license = "MIT"
+
+[[bin]]
+name = "lore-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Lore is not published to crates.io, so the client library is taken straight
+# from the upstream repository. The revision is pinned: `lore` is a nightly
+# versioned internal crate with no API stability promise.
+lore = { git = "https://github.com/EpicGames/lore", rev = "695630be887f78531e088520acd128f3aa22ddd4" }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "clock"] }
+parking_lot = "0.12"
+ratatui = "0.29"
+
+# Lore builds its transport against a vendored fork of quinn-proto. A `[patch]`
+# in a dependency's own workspace does not carry over to whoever depends on it,
+# so it has to be repeated here or the transport crate compiles against upstream
+# quinn-proto.
+[patch.crates-io]
+quinn-proto = { git = "https://github.com/EpicGames/lore", rev = "695630be887f78531e088520acd128f3aa22ddd4" }

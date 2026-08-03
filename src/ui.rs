@@ -1,0 +1,622 @@
+// SPDX-License-Identifier: MIT
+//! Rendering. Reads `App`, writes nothing back except list scroll state.
+
+use ratatui::Frame;
+use ratatui::layout::Alignment;
+use ratatui::layout::Constraint;
+use ratatui::layout::Layout;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::widgets::Block;
+use ratatui::widgets::Clear;
+use ratatui::widgets::List;
+use ratatui::widgets::ListItem;
+use ratatui::widgets::ListState;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Wrap;
+
+use crate::app::App;
+use crate::app::Modal;
+use crate::app::Row;
+use crate::app::View;
+use crate::ops::Section;
+
+const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
+
+fn section_label(section: Section) -> &'static str {
+    match section {
+        Section::Staged => "Staged",
+        Section::Unmerged => "Unmerged",
+        Section::Unstaged => "Unstaged",
+    }
+}
+
+fn section_color(section: Section) -> Color {
+    match section {
+        Section::Staged => Color::Green,
+        Section::Unmerged => Color::Red,
+        Section::Unstaged => Color::Yellow,
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_time(millis: u64) -> String {
+    match chrono::DateTime::from_timestamp_millis(millis as i64) {
+        Some(time) => time
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+        None => String::new(),
+    }
+}
+
+pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
+    let [header, body, log, footer] = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Min(6),
+        Constraint::Length(8),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+
+    draw_header(frame, app, header);
+
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
+
+    match app.view {
+        View::Status => {
+            draw_status_list(frame, app, left);
+            draw_status_detail(frame, app, right);
+        }
+        View::History => {
+            draw_history_list(frame, app, left);
+            draw_history_detail(frame, app, right);
+        }
+        View::Repos => {
+            draw_repos_list(frame, app, left);
+            draw_repos_detail(frame, app, right);
+        }
+    }
+
+    draw_log(frame, app, log);
+    draw_footer(frame, app, footer);
+
+    match &app.modal {
+        Modal::None => {}
+        Modal::Commit { message } => draw_commit(frame, message),
+        Modal::Confirm { prompt, .. } => draw_confirm(frame, prompt),
+        Modal::Help => draw_help(frame),
+    }
+}
+
+fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let title = if app.busy() {
+        format!(" lore {} ", SPINNER[app.spinner % SPINNER.len()])
+    } else {
+        " lore ".to_string()
+    };
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("path  ", Style::new().fg(Color::DarkGray)),
+        Span::raw(app.repo_path.clone()),
+    ])];
+
+    match &app.status {
+        Some(status) => {
+            lines.push(Line::from(vec![
+                Span::styled("branch ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    status.branch_name.clone(),
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("revision ", Style::new().fg(Color::DarkGray)),
+                Span::raw(format!("{}", status.revision_number)),
+                Span::raw("  "),
+                Span::styled("remote ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    status.remote_state().to_string(),
+                    Style::new().fg(if status.remote_state() == "in sync" {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }),
+                ),
+                Span::raw(if status.remote_branch_exist {
+                    format!(" ({})", status.remote_revision_number)
+                } else {
+                    String::new()
+                }),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("signature ", Style::new().fg(Color::DarkGray)),
+                Span::styled(status.revision.clone(), Style::new().fg(Color::DarkGray)),
+            ]));
+        }
+        None => lines.push(Line::from(Span::styled(
+            "loading…",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+
+    frame.render_widget(Paragraph::new(lines).block(Block::bordered().title(title)), area);
+}
+
+fn draw_status_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let mut items: Vec<ListItem<'_>> = Vec::new();
+
+    if let Some(status) = &app.status {
+        for row in &app.rows {
+            match *row {
+                Row::Header(section, count) => items.push(ListItem::new(Line::from(Span::styled(
+                    format!("{} ({count})", section_label(section)),
+                    Style::new()
+                        .fg(section_color(section))
+                        .add_modifier(Modifier::BOLD),
+                )))),
+                Row::File(section, index) => {
+                    let files = match section {
+                        Section::Staged => &status.staged,
+                        Section::Unmerged => &status.unmerged,
+                        Section::Unstaged => &status.unstaged,
+                    };
+                    let Some(file) = files.get(index) else {
+                        continue;
+                    };
+                    items.push(ListItem::new(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            file.action.to_string(),
+                            Style::new().fg(section_color(section)),
+                        ),
+                        Span::raw("  "),
+                        Span::raw(file.path.clone()),
+                    ])));
+                }
+            }
+        }
+    }
+
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  working copy clean",
+            Style::new().fg(Color::DarkGray),
+        ))));
+    }
+
+    let list = List::new(items)
+        .block(Block::bordered().title(" Status "))
+        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.rows.is_empty() {
+        state.select(Some(app.status_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_status_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    if let Some(status) = &app.status {
+        lines.push(Line::from(vec![
+            Span::styled("repository ", Style::new().fg(Color::DarkGray)),
+            Span::raw(status.repository.clone()),
+        ]));
+        lines.push(Line::from(format!(
+            "{} staged · {} unmerged · {} unstaged",
+            status.staged.len(),
+            status.unmerged.len(),
+            status.unstaged.len()
+        )));
+        lines.push(Line::raw(""));
+    }
+
+    match app.selected_file() {
+        Some((section, path)) => {
+            lines.push(Line::from(Span::styled(
+                section_label(section),
+                Style::new()
+                    .fg(section_color(section))
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::raw(path.to_string()));
+
+            if let Some(status) = &app.status
+                && let Some(Row::File(_, index)) = app.rows.get(app.status_selected).copied()
+            {
+                let files = match section {
+                    Section::Staged => &status.staged,
+                    Section::Unmerged => &status.unmerged,
+                    Section::Unstaged => &status.unstaged,
+                };
+                if let Some(file) = files.get(index) {
+                    lines.push(Line::raw(format!("size {}", format_size(file.size))));
+                    if file.conflict {
+                        lines.push(Line::from(Span::styled(
+                            "unresolved conflict",
+                            Style::new().fg(Color::Red),
+                        )));
+                    }
+                }
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "no file selected",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Detail "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_history_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .history
+        .iter()
+        .map(|entry| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:>5} ", entry.number),
+                    Style::new().fg(Color::Cyan),
+                ),
+                Span::raw(entry.subject().to_string()),
+            ]))
+        })
+        .collect();
+
+    let items = if items.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  no revisions",
+            Style::new().fg(Color::DarkGray),
+        )))]
+    } else {
+        items
+    };
+
+    let list = List::new(items)
+        .block(Block::bordered().title(" History "))
+        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.history.is_empty() {
+        state.select(Some(app.history_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_history_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    match app.history.get(app.history_selected) {
+        Some(entry) => {
+            lines.push(Line::from(vec![
+                Span::styled("revision  ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    entry.number.to_string(),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("signature ", Style::new().fg(Color::DarkGray)),
+                Span::raw(entry.revision.clone()),
+            ]));
+            if !entry.author.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("author    ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(entry.author.clone()),
+                ]));
+            }
+            if entry.timestamp > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("date      ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(format_time(entry.timestamp)),
+                ]));
+            }
+            for parent in &entry.parents {
+                lines.push(Line::from(vec![
+                    Span::styled("parent    ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(parent.clone()),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            for line in entry.message.lines() {
+                lines.push(Line::raw(line.to_string()));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "no revision selected",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Revision "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_repos_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    // The repository this working copy belongs to gets a marker, so the
+    // browser doubles as "where am I on this server".
+    let current = app
+        .status
+        .as_ref()
+        .map(|status| status.repository.clone())
+        .unwrap_or_default();
+
+    let items: Vec<ListItem<'_>> = app
+        .repos
+        .iter()
+        .map(|entry| {
+            let here = !current.is_empty() && entry.id == current;
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if here { " ● " } else { "   " },
+                    Style::new().fg(Color::Green),
+                ),
+                Span::styled(
+                    entry.name.clone(),
+                    if here {
+                        Style::new().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new()
+                    },
+                ),
+            ]))
+        })
+        .collect();
+
+    let items = if items.is_empty() {
+        let text = match app.remote.as_deref() {
+            Some("") => "  no remote configured",
+            None => "  reading the remote…",
+            Some(_) => "  no repositories on this server",
+        };
+        vec![ListItem::new(Line::from(Span::styled(
+            text,
+            Style::new().fg(Color::DarkGray),
+        )))]
+    } else {
+        items
+    };
+
+    let title = match app.remote.as_deref() {
+        Some(url) if !url.is_empty() => format!(" Repositories · {url} "),
+        _ => " Repositories ".to_string(),
+    };
+
+    let list = List::new(items)
+        .block(Block::bordered().title(title))
+        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.repos.is_empty() {
+        state.select(Some(app.repos_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_repos_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    match app.selected_repo() {
+        Some(entry) => {
+            lines.push(Line::from(vec![
+                Span::styled("name       ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    entry.name.clone(),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("id         ", Style::new().fg(Color::DarkGray)),
+                Span::raw(entry.id.clone()),
+            ]));
+
+            match app.repo_info.get(&entry.name) {
+                Some(Ok(info)) => {
+                    if !info.description.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("description", Style::new().fg(Color::DarkGray)),
+                            Span::raw(format!(" {}", info.description)),
+                        ]));
+                    }
+                    if !info.default_branch.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("branch     ", Style::new().fg(Color::DarkGray)),
+                            Span::styled(info.default_branch.clone(), Style::new().fg(Color::Cyan)),
+                        ]));
+                    }
+                    if !info.creator.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("creator    ", Style::new().fg(Color::DarkGray)),
+                            Span::raw(info.creator.clone()),
+                        ]));
+                    }
+                    if info.created > 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled("created    ", Style::new().fg(Color::DarkGray)),
+                            Span::raw(format_time(info.created)),
+                        ]));
+                    }
+                    if !info.remote_url.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("url        ", Style::new().fg(Color::DarkGray)),
+                            Span::raw(info.remote_url.clone()),
+                        ]));
+                    }
+                }
+                Some(Err(error)) => lines.push(Line::from(Span::styled(
+                    error.clone(),
+                    Style::new().fg(Color::Red),
+                ))),
+                None => lines.push(Line::from(Span::styled(
+                    "loading…",
+                    Style::new().fg(Color::DarkGray),
+                ))),
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "no repository selected",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Repository "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_log(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let log = app.log.lock();
+    let start = log.len().saturating_sub(visible);
+
+    let lines: Vec<Line<'_>> = log[start..]
+        .iter()
+        .map(|line| {
+            let style = if line.starts_with("[error]") {
+                Style::new().fg(Color::Red)
+            } else if line.starts_with("[warn]") {
+                Style::new().fg(Color::Yellow)
+            } else if line.starts_with('>') || line.starts_with('<') {
+                Style::new().fg(Color::Cyan)
+            } else {
+                Style::new().fg(Color::Gray)
+            };
+            Line::from(Span::styled(line.clone(), style))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Log ")),
+        area,
+    );
+}
+
+fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let line = match &app.message {
+        Some((text, true)) => Line::from(Span::styled(
+            format!(" {text} "),
+            Style::new().fg(Color::White).bg(Color::Red),
+        )),
+        Some((text, false)) => Line::from(Span::styled(
+            format!(" {text} "),
+            Style::new().fg(Color::Black).bg(Color::Green),
+        )),
+        None => Line::from(Span::styled(
+            " tab view · j/k move · s stage · S all · u unstage · c commit · p push · y sync · r refresh · 3 repos · ? help · q quit",
+            Style::new().fg(Color::DarkGray),
+        )),
+    };
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Centered rect `width` x `height`, clamped to the frame.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+fn draw_commit(frame: &mut Frame<'_>, message: &str) {
+    let area = centered(frame.area(), 70, 5);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!("{message}_")),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "enter commit · esc cancel",
+                Style::new().fg(Color::DarkGray),
+            )),
+        ])
+        .block(Block::bordered().title(" Commit message "))
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_confirm(frame: &mut Frame<'_>, prompt: &str) {
+    let area = centered(frame.area(), 60, 5);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(prompt.to_string()),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "y confirm · any other key cancel",
+                Style::new().fg(Color::DarkGray),
+            )),
+        ])
+        .block(Block::bordered().title(" Confirm "))
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_help(frame: &mut Frame<'_>) {
+    let keys = [
+        ("tab / 1 2 3", "switch status, history, repositories"),
+        ("j k ↑ ↓", "move selection"),
+        ("g G", "jump to first / last"),
+        ("s", "stage the selected file"),
+        ("S", "scan the working copy and stage everything"),
+        ("u", "unstage the selected file"),
+        ("c", "commit the staged revision"),
+        ("p", "push to the remote"),
+        ("y", "sync to the branch tip"),
+        ("r / R", "refresh status or repositories / history"),
+        ("esc", "dismiss the status message"),
+        ("q / ctrl-c", "quit"),
+    ];
+
+    let mut lines = vec![Line::raw("")];
+    for (key, description) in keys {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {key:<12}"), Style::new().fg(Color::Cyan)),
+            Span::raw(description),
+        ]));
+    }
+
+    let area = centered(frame.area(), 64, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Keys ").title_alignment(Alignment::Center)),
+        area,
+    );
+}

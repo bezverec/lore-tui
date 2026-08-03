@@ -1,0 +1,9 @@
+# Lore compiles against these cfg flags — they live in the Lore repository's own
+# `.cargo/config.toml`, which does not apply when Lore is pulled in as a
+# dependency. Without them `lore-base` fails to build (tokio runtime metrics) and
+# `uuid` loses the unstable byte conversions Lore relies on.
+[build]
+rustflags = [
+    "--cfg", "tokio_unstable",
+    "--cfg", "uuid_unstable",
+]
