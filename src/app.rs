@@ -2,6 +2,7 @@
 //! TUI state and the key handling that drives it.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -17,6 +18,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::event::KeyModifiers;
 
 use crate::ops;
+use crate::ops::FileEntry;
 use crate::ops::HistoryEntry;
 use crate::ops::LogSink;
 use crate::ops::OpResult;
@@ -41,6 +43,16 @@ pub enum Row {
     File(Section, usize),
 }
 
+/// What a file action should operate on.
+enum Targets {
+    Paths(Vec<String>),
+    /// Nothing marked and nothing selected.
+    Empty,
+    /// Candidates exist, but none of them sit in a section the action applies
+    /// to — staging something already staged, say.
+    Inapplicable,
+}
+
 pub enum Modal {
     None,
     Commit { message: String },
@@ -56,6 +68,9 @@ pub struct App {
     pub history: Vec<HistoryEntry>,
     pub rows: Vec<Row>,
     pub status_selected: usize,
+    /// Files marked for the next stage or unstage, by the path Lore operates
+    /// on. Empty means the action applies to the selection instead.
+    pub marked: HashSet<String>,
     pub history_selected: usize,
     /// Server this working copy points at, and the one the browser lists.
     /// `None` until the config read lands; empty when there is no remote.
@@ -89,6 +104,7 @@ impl App {
             history: Vec::new(),
             rows: Vec::new(),
             status_selected: 0,
+            marked: HashSet::new(),
             history_selected: 0,
             remote: None,
             repos: Vec::new(),
@@ -211,6 +227,11 @@ impl App {
                         Ok(summary) => {
                             self.message = Some((summary, false));
                             ops::log_push(&self.log, format!("< {name} ok"));
+                            // The marks have been acted on; keeping them would
+                            // leave the files selected in their new section.
+                            if matches!(name, "stage" | "unstage") {
+                                self.marked.clear();
+                            }
                         }
                         Err(error) => {
                             self.message = Some((format!("{name}: {error}"), true));
@@ -301,6 +322,16 @@ impl App {
             }
         }
 
+        // Marks name paths, not list positions, so a refresh that drops a file
+        // has to drop its mark too — otherwise it would silently apply to a
+        // file that reappears later under the same path.
+        let live: HashSet<String> = self
+            .files()
+            .into_iter()
+            .map(|(_, file)| file.target().to_string())
+            .collect();
+        self.marked.retain(|path| live.contains(path));
+
         self.rows = rows;
         if self.status_selected >= self.rows.len() {
             self.status_selected = self.rows.len().saturating_sub(1);
@@ -321,10 +352,69 @@ impl App {
             Section::Unmerged => &status.unmerged,
             Section::Unstaged => &status.unstaged,
         };
-        // Moved files are shown as "from -> to"; Lore takes the current path.
-        let path = files.get(index)?.path.as_str();
-        let path = path.rsplit(" -> ").next().unwrap_or(path);
-        Some((section, path))
+        Some((section, files.get(index)?.target()))
+    }
+
+    /// Every file in the current snapshot, paired with its section.
+    fn files(&self) -> Vec<(Section, &FileEntry)> {
+        let Some(status) = self.status.as_ref() else {
+            return Vec::new();
+        };
+
+        [
+            (Section::Staged, &status.staged),
+            (Section::Unmerged, &status.unmerged),
+            (Section::Unstaged, &status.unstaged),
+        ]
+        .into_iter()
+        .flat_map(|(section, files)| files.iter().map(move |file| (section, file)))
+        .collect()
+    }
+
+    pub fn is_marked(&self, file: &FileEntry) -> bool {
+        self.marked.contains(file.target())
+    }
+
+    fn toggle_mark(&mut self) {
+        if self.view != View::Status {
+            return;
+        }
+        let Some(path) = self.selected_file().map(|(_, path)| path.to_string()) else {
+            return;
+        };
+        if !self.marked.remove(&path) {
+            self.marked.insert(path);
+        }
+    }
+
+    /// Resolve what the next file action runs on. Marks win when there are any;
+    /// otherwise it is the selected file, exactly as before marks existed.
+    fn targets(&self, allowed: &[Section]) -> Targets {
+        if self.marked.is_empty() {
+            let Some((section, path)) = self.selected_file() else {
+                return Targets::Empty;
+            };
+            return if allowed.contains(&section) {
+                Targets::Paths(vec![path.to_string()])
+            } else {
+                Targets::Inapplicable
+            };
+        }
+
+        let mut paths: Vec<String> = self
+            .files()
+            .into_iter()
+            .filter(|(section, file)| allowed.contains(section) && self.is_marked(file))
+            .map(|(_, file)| file.target().to_string())
+            .collect();
+        paths.sort();
+        paths.dedup();
+
+        if paths.is_empty() {
+            Targets::Inapplicable
+        } else {
+            Targets::Paths(paths)
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -433,7 +523,15 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.modal = Modal::Help,
-            KeyCode::Esc => self.message = None,
+            // Marks are the more disruptive state to be stuck with, so escape
+            // clears them first and only then dismisses the message.
+            KeyCode::Esc => {
+                if self.marked.is_empty() {
+                    self.message = None;
+                } else {
+                    self.marked.clear();
+                }
+            }
 
             KeyCode::Tab => {
                 let next = match self.view {
@@ -465,29 +563,35 @@ impl App {
             },
             KeyCode::Char('R') => self.dispatch(Request::History),
 
-            KeyCode::Char('s') => match self.selected_file() {
-                Some((Section::Staged, _)) => {
-                    self.message = Some(("already staged".into(), true));
+            KeyCode::Char(' ') => self.toggle_mark(),
+
+            KeyCode::Char('s') => match self.targets(&[Section::Unstaged, Section::Unmerged]) {
+                Targets::Paths(paths) => self.dispatch(Request::Stage { paths, scan: false }),
+                Targets::Empty => self.message = Some(("no file selected".into(), true)),
+                Targets::Inapplicable => {
+                    let text = if self.marked.is_empty() {
+                        "already staged"
+                    } else {
+                        "no marked file to stage"
+                    };
+                    self.message = Some((text.into(), true));
                 }
-                Some((_, path)) => {
-                    let paths = vec![path.to_string()];
-                    self.dispatch(Request::Stage { paths, scan: false });
-                }
-                None => self.message = Some(("no file selected".into(), true)),
             },
             KeyCode::Char('S') => self.dispatch(Request::Stage {
                 paths: vec![".".to_string()],
                 scan: true,
             }),
-            KeyCode::Char('u') => match self.selected_file() {
-                Some((Section::Unstaged, _)) => {
-                    self.message = Some(("not staged".into(), true));
+            KeyCode::Char('u') => match self.targets(&[Section::Staged, Section::Unmerged]) {
+                Targets::Paths(paths) => self.dispatch(Request::Unstage { paths }),
+                Targets::Empty => self.message = Some(("no file selected".into(), true)),
+                Targets::Inapplicable => {
+                    let text = if self.marked.is_empty() {
+                        "not staged"
+                    } else {
+                        "no marked file to unstage"
+                    };
+                    self.message = Some((text.into(), true));
                 }
-                Some((_, path)) => {
-                    let paths = vec![path.to_string()];
-                    self.dispatch(Request::Unstage { paths });
-                }
-                None => self.message = Some(("no file selected".into(), true)),
             },
 
             KeyCode::Char('c') => {

@@ -38,22 +38,25 @@ Three views, switched with `tab` or `1` `2` `3`:
   repository description, default branch, creator and creation date. The repository the
   current working copy belongs to is marked `●`.
 
-Actions available from the status view: stage, unstage, commit, push and sync. Push and sync
-ask for confirmation first. The bottom pane streams the events of whatever is running.
+Actions available from the status view: stage, unstage, commit, push and sync. Files can be
+marked with `space` and staged or unstaged as a batch; with nothing marked the action applies
+to the selected file. Push and sync ask for confirmation first. The bottom pane streams the
+events of whatever is running.
 
 | Key | Action |
 | --- | --- |
 | `tab`, `1` `2` `3` | switch between status, history and repositories |
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
-| `s` | stage the selected file |
+| `space` | mark the file for the next stage or unstage |
+| `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |
-| `u` | unstage the selected file |
+| `u` | unstage the marked files, or the selected one when nothing is marked |
 | `c` | commit the staged revision (opens a message prompt) |
 | `p` | push to the remote |
 | `y` | sync to the branch tip |
 | `r` | refresh the status, or the repository list in the browser |
 | `R` | refresh the history |
-| `esc` | dismiss the status message |
+| `esc` | clear the marks, or dismiss the status message |
 | `?` | key help |
 | `q`, `ctrl-c` | quit |
 

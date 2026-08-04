@@ -46,10 +46,18 @@ pub enum Section {
 
 #[derive(Clone, Debug)]
 pub struct FileEntry {
+    /// Display path. A moved file reads `from -> to`.
     pub path: String,
     pub action: char,
     pub size: u64,
     pub conflict: bool,
+}
+
+impl FileEntry {
+    /// The path Lore operates on, which for a move is the destination.
+    pub fn target(&self) -> &str {
+        self.path.rsplit(" -> ").next().unwrap_or(&self.path)
+    }
 }
 
 #[derive(Clone, Debug, Default)]

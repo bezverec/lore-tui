@@ -179,14 +179,25 @@ fn draw_status_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     let Some(file) = files.get(index) else {
                         continue;
                     };
+                    let marked = app.is_marked(file);
                     items.push(ListItem::new(Line::from(vec![
-                        Span::raw("  "),
+                        Span::styled(
+                            if marked { " ✓ " } else { "   " },
+                            Style::new().fg(Color::Magenta),
+                        ),
                         Span::styled(
                             file.action.to_string(),
                             Style::new().fg(section_color(section)),
                         ),
                         Span::raw("  "),
-                        Span::raw(file.path.clone()),
+                        Span::styled(
+                            file.path.clone(),
+                            if marked {
+                                Style::new().add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::new()
+                            },
+                        ),
                     ])));
                 }
             }
@@ -200,8 +211,14 @@ fn draw_status_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ))));
     }
 
+    let title = if app.marked.is_empty() {
+        " Status ".to_string()
+    } else {
+        format!(" Status · {} marked ", app.marked.len())
+    };
+
     let list = List::new(items)
-        .block(Block::bordered().title(" Status "))
+        .block(Block::bordered().title(title))
         .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
     let mut state = ListState::default();
@@ -532,7 +549,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(Color::Black).bg(Color::Green),
         )),
         None => Line::from(Span::styled(
-            " tab view · j/k move · s stage · S all · u unstage · c commit · p push · y sync · r refresh · 3 repos · ? help · q quit",
+            " tab view · j/k move · space mark · s stage · S all · u unstage · c commit · p push · y sync · r refresh · ? help · q quit",
             Style::new().fg(Color::DarkGray),
         )),
     };
@@ -593,14 +610,15 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("tab / 1 2 3", "switch status, history, repositories"),
         ("j k ↑ ↓", "move selection"),
         ("g G", "jump to first / last"),
-        ("s", "stage the selected file"),
+        ("space", "mark the file for the next stage or unstage"),
+        ("s", "stage the marked files, or the selected one"),
         ("S", "scan the working copy and stage everything"),
-        ("u", "unstage the selected file"),
+        ("u", "unstage the marked files, or the selected one"),
         ("c", "commit the staged revision"),
         ("p", "push to the remote"),
         ("y", "sync to the branch tip"),
         ("r / R", "refresh status or repositories / history"),
-        ("esc", "dismiss the status message"),
+        ("esc", "clear the marks, or dismiss the status message"),
         ("q / ctrl-c", "quit"),
     ];
 
