@@ -115,6 +115,14 @@ impl HistoryEntry {
     }
 }
 
+/// A unified diff for one file, as Lore renders it.
+#[derive(Clone, Debug)]
+pub struct DiffEntry {
+    pub path: String,
+    pub action: char,
+    pub patch: String,
+}
+
 /// One repository as the server lists it. The listing carries nothing but an
 /// identity — everything else comes from a per-repository `info` call.
 #[derive(Clone, Debug)]
@@ -141,6 +149,7 @@ pub struct RepoInfo {
 pub enum OpResult {
     Status(Result<StatusSnapshot, String>),
     History(Result<Vec<HistoryEntry>, String>),
+    Diff(Result<Vec<DiffEntry>, String>),
     RemoteUrl(Result<String, String>),
     Repos(Result<Vec<RepoEntry>, String>),
     RepoInfo {
@@ -537,6 +546,51 @@ fn sync(globals: LoreGlobalArgs, sink: &LogSink) -> Result<String, String> {
     outcome.into_result(summary)
 }
 
+/// Number of unchanged context lines around each hunk. Matches Lore's own
+/// `DEFAULT_CONTEXT_LINES`, which is not re-exported through `lore::interface`.
+const DIFF_CONTEXT_LINES: u32 = 3;
+
+/// Diff the given paths. Both revisions are left empty, which Lore reads as
+/// "the current revision" and "the current filesystem state" — the working copy
+/// change, which is what the status list is showing.
+fn diff(
+    globals: LoreGlobalArgs,
+    paths: Vec<String>,
+    sink: &LogSink,
+) -> Result<Vec<DiffEntry>, String> {
+    let entries: Arc<Mutex<Vec<DiffEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let collector = entries.clone();
+    let cb = callback(sink, &outcome, move |event| {
+        if let LoreEvent::FileDiff(data) = event {
+            collector.lock().push(DiffEntry {
+                path: data.path.as_str().to_string(),
+                action: action_char(data.action),
+                patch: data.patch.as_str().to_string(),
+            });
+        }
+    });
+
+    let args = LoreFileDiffArgs {
+        paths: LoreArray::from_vec(paths.iter().map(LoreString::from).collect()),
+        source_revision: LoreString::from(""),
+        target_revision: LoreString::from(""),
+        diff3: 0,
+        context_lines: DIFF_CONTEXT_LINES,
+        ignore_whitespace_eol: 0,
+        ignore_whitespace_inline: 0,
+    };
+
+    lore::runtime().block_on(lore::file::diff(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(String::new())?;
+
+    let entries = std::mem::take(&mut *entries.lock());
+    Ok(entries)
+}
+
 /// Read the remote this working copy was created against, which is also the
 /// server whose repositories the browser lists. Empty when the repository has
 /// no remote configured.
@@ -631,6 +685,7 @@ pub fn repository_url(remote: &str, name: &str) -> String {
 pub enum Request {
     Status { scan: bool },
     History,
+    Diff { paths: Vec<String> },
     RemoteUrl,
     Repos { url: String },
     RepoInfo { url: String, name: String },
@@ -646,6 +701,7 @@ impl Request {
         match self {
             Request::Status { .. } => "status",
             Request::History => "history",
+            Request::Diff { .. } => "diff",
             Request::RemoteUrl => "remote",
             Request::Repos { .. } => "repositories",
             Request::RepoInfo { .. } => "repository info",
@@ -677,6 +733,7 @@ pub fn spawn(
         let result = match request {
             Request::Status { scan } => OpResult::Status(status(globals, scan, &sink)),
             Request::History => OpResult::History(history(globals, 0, &sink)),
+            Request::Diff { paths } => OpResult::Diff(diff(globals, paths, &sink)),
             Request::RemoteUrl => OpResult::RemoteUrl(remote_url(globals, &sink)),
             Request::Repos { url } => OpResult::Repos(repos(globals, url, &sink)),
             Request::RepoInfo { url, name } => OpResult::RepoInfo {

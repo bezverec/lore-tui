@@ -18,6 +18,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::event::KeyModifiers;
 
 use crate::ops;
+use crate::ops::DiffEntry;
 use crate::ops::FileEntry;
 use crate::ops::HistoryEntry;
 use crate::ops::LogSink;
@@ -33,6 +34,26 @@ pub enum View {
     Status,
     History,
     Repos,
+    /// Reached with `d` from the status view rather than the view cycle, since
+    /// it shows one specific diff rather than a standing list.
+    Diff,
+}
+
+/// How a diff line should read. Classified once when the diff lands, so
+/// scrolling does not re-parse the patch on every frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DiffKind {
+    File,
+    Hunk,
+    Add,
+    Delete,
+    Conflict,
+    Context,
+}
+
+pub struct DiffLine {
+    pub kind: DiffKind,
+    pub text: String,
 }
 
 /// A rendered line in the status view. Headers are selectable targets for
@@ -74,6 +95,12 @@ pub struct App {
     pub history_selected: usize,
     /// Server this working copy points at, and the one the browser lists.
     /// `None` until the config read lands; empty when there is no remote.
+    pub diff: Vec<DiffLine>,
+    pub diff_title: String,
+    pub diff_scroll: usize,
+    /// Lines the diff pane can show, written by the renderer each frame so
+    /// scrolling can stop at the last screenful instead of the last line.
+    pub diff_viewport: usize,
     pub remote: Option<String>,
     pub repos: Vec<RepoEntry>,
     pub repos_selected: usize,
@@ -106,6 +133,10 @@ impl App {
             status_selected: 0,
             marked: HashSet::new(),
             history_selected: 0,
+            diff: Vec::new(),
+            diff_title: String::new(),
+            diff_scroll: 0,
+            diff_viewport: 0,
             remote: None,
             repos: Vec::new(),
             repos_selected: 0,
@@ -192,6 +223,20 @@ impl App {
                 }
                 OpResult::History(Err(error)) => {
                     self.message = Some((format!("history: {error}"), true));
+                }
+                OpResult::Diff(Ok(entries)) => {
+                    if entries.iter().all(|entry| entry.patch.trim().is_empty()) {
+                        // Lore answers with an empty patch for a file whose
+                        // content did not change textually — a binary asset, or
+                        // a pure rename.
+                        self.message = Some(("nothing to show in a diff".into(), true));
+                    } else {
+                        self.build_diff(&entries);
+                        self.view = View::Diff;
+                    }
+                }
+                OpResult::Diff(Err(error)) => {
+                    self.message = Some((format!("diff: {error}"), true));
                 }
                 OpResult::RemoteUrl(Ok(url)) => {
                     self.remote = Some(url);
@@ -288,6 +333,71 @@ impl App {
         let name = entry.name.clone();
         let url = ops::repository_url(&remote, &name);
         self.dispatch(Request::RepoInfo { url, name });
+    }
+
+    /// Flatten the patches into styled lines once, ready to scroll.
+    fn build_diff(&mut self, entries: &[DiffEntry]) {
+        let mut lines = Vec::new();
+
+        for entry in entries {
+            if !lines.is_empty() {
+                lines.push(DiffLine {
+                    kind: DiffKind::Context,
+                    text: String::new(),
+                });
+            }
+            lines.push(DiffLine {
+                kind: DiffKind::File,
+                text: format!("{}  {}", entry.action, entry.path),
+            });
+
+            if entry.patch.trim().is_empty() {
+                lines.push(DiffLine {
+                    kind: DiffKind::Context,
+                    text: "  (no textual diff)".to_string(),
+                });
+                continue;
+            }
+
+            for line in entry.patch.lines() {
+                let kind = if line.starts_with("<<<<<<<")
+                    || line.starts_with("|||||||")
+                    || line.starts_with("=======")
+                    || line.starts_with(">>>>>>>")
+                {
+                    DiffKind::Conflict
+                } else if line.starts_with("@@") {
+                    DiffKind::Hunk
+                } else if line.starts_with("+++") || line.starts_with("---") {
+                    // File headers of the patch itself; the path is already in
+                    // the heading above, so they read as context.
+                    DiffKind::Context
+                } else if line.starts_with('+') {
+                    DiffKind::Add
+                } else if line.starts_with('-') {
+                    DiffKind::Delete
+                } else {
+                    DiffKind::Context
+                };
+
+                lines.push(DiffLine {
+                    kind,
+                    text: line.to_string(),
+                });
+            }
+        }
+
+        self.diff_title = match entries {
+            [entry] => format!(" Diff · {} ", entry.path),
+            entries => format!(" Diff · {} files ", entries.len()),
+        };
+        self.diff = lines;
+        self.diff_scroll = 0;
+    }
+
+    /// Largest scroll offset that still fills the pane.
+    fn diff_max_scroll(&self) -> usize {
+        self.diff.len().saturating_sub(self.diff_viewport.max(1))
     }
 
     pub fn selected_repo(&self) -> Option<&RepoEntry> {
@@ -452,6 +562,11 @@ impl App {
                 let index = (self.repos_selected as isize + delta).clamp(0, last);
                 self.repos_selected = index as usize;
             }
+            View::Diff => {
+                let last = self.diff_max_scroll() as isize;
+                let offset = (self.diff_scroll as isize + delta).clamp(0, last);
+                self.diff_scroll = offset as usize;
+            }
         }
     }
 
@@ -476,6 +591,9 @@ impl App {
                 } else {
                     self.repos.len().saturating_sub(1)
                 };
+            }
+            View::Diff => {
+                self.diff_scroll = if first { 0 } else { self.diff_max_scroll() };
             }
         }
     }
@@ -520,6 +638,18 @@ impl App {
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) {
+        // The diff is a detour rather than a place to live, so everything that
+        // means "I am done here" takes you back to the status list.
+        if self.view == View::Diff
+            && matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('d' | 'q')
+            )
+        {
+            self.view = View::Status;
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.modal = Modal::Help,
@@ -537,7 +667,8 @@ impl App {
                 let next = match self.view {
                     View::Status => View::History,
                     View::History => View::Repos,
-                    View::Repos => View::Status,
+                    // The diff is outside the cycle; tab leaves it.
+                    View::Repos | View::Diff => View::Status,
                 };
                 self.show(next);
             }
@@ -564,6 +695,17 @@ impl App {
             KeyCode::Char('R') => self.dispatch(Request::History),
 
             KeyCode::Char(' ') => self.toggle_mark(),
+
+            KeyCode::Char('d') => {
+                if self.view == View::Status {
+                    match self.targets(&[Section::Staged, Section::Unmerged, Section::Unstaged]) {
+                        Targets::Paths(paths) => self.dispatch(Request::Diff { paths }),
+                        Targets::Empty | Targets::Inapplicable => {
+                            self.message = Some(("no file selected".into(), true));
+                        }
+                    }
+                }
+            }
 
             KeyCode::Char('s') => match self.targets(&[Section::Unstaged, Section::Unmerged]) {
                 Targets::Paths(paths) => self.dispatch(Request::Stage { paths, scan: false }),

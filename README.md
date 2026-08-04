@@ -38,6 +38,10 @@ Three views, switched with `tab` or `1` `2` `3`:
   repository description, default branch, creator and creation date. The repository the
   current working copy belongs to is marked `●`.
 
+`d` opens a scrollable unified diff of the marked files, or of the selected one — the working
+copy against the current revision. It is reached from the status view rather than the view
+cycle, and `d`, `esc` or `q` returns.
+
 Actions available from the status view: stage, unstage, commit, push and sync. Files can be
 marked with `space` and staged or unstaged as a batch; with nothing marked the action applies
 to the selected file. Push and sync ask for confirmation first. The bottom pane streams the
@@ -47,7 +51,8 @@ events of whatever is running.
 | --- | --- |
 | `tab`, `1` `2` `3` | switch between status, history and repositories |
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
-| `space` | mark the file for the next stage or unstage |
+| `space` | mark the file for the next stage, unstage or diff |
+| `d` | diff the marked files, or the selected one; `d`, `esc` or `q` closes it |
 | `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |
 | `u` | unstage the marked files, or the selected one when nothing is marked |
@@ -117,7 +122,8 @@ If the Lore server also runs in Docker, put the container on the same network (`
 - **Branches of other repositories.** Lore's `branch::list` has no URL parameter — it only
   reads the local working copy — so branch information is limited to the repository you are
   standing in.
-- **Diffs.** The status view reports which files changed, not what changed inside them.
+- **Diffs between revisions.** `d` diffs the working copy against the current revision;
+  picking two arbitrary revisions is not wired up, though `file::diff` takes them.
 - **Concurrent operations.** One Lore call runs at a time; the rest queue behind it.
 
 ## How it works

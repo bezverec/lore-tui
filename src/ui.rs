@@ -20,6 +20,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
 use crate::app::App;
+use crate::app::DiffKind;
 use crate::app::Modal;
 use crate::app::Row;
 use crate::app::View;
@@ -92,6 +93,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             draw_repos_list(frame, app, left);
             draw_repos_detail(frame, app, right);
         }
+        // A diff needs the width; it takes the whole body rather than a column.
+        View::Diff => draw_diff(frame, app, body),
     }
 
     draw_log(frame, app, log);
@@ -511,6 +514,49 @@ fn draw_repos_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn draw_diff(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let viewport = area.height.saturating_sub(2) as usize;
+    // Recorded for the scroll clamp, which cannot know the pane height.
+    app.diff_viewport = viewport;
+
+    let start = app.diff_scroll.min(app.diff.len());
+    let end = (start + viewport).min(app.diff.len());
+
+    let lines: Vec<Line<'_>> = app.diff[start..end]
+        .iter()
+        .map(|line| {
+            let style = match line.kind {
+                DiffKind::File => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                DiffKind::Hunk => Style::new().fg(Color::Blue),
+                DiffKind::Add => Style::new().fg(Color::Green),
+                DiffKind::Delete => Style::new().fg(Color::Red),
+                DiffKind::Conflict => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                DiffKind::Context => Style::new().fg(Color::Gray),
+            };
+            Line::from(Span::styled(line.text.clone(), style))
+        })
+        .collect();
+
+    let title = if app.diff.len() > viewport {
+        format!(
+            "{}· {}-{} of {} ",
+            app.diff_title,
+            start + 1,
+            end,
+            app.diff.len()
+        )
+    } else {
+        app.diff_title.clone()
+    };
+
+    // Deliberately unwrapped: a wrapped diff loses the column alignment that
+    // makes a patch readable. Long lines are cut at the pane edge.
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        area,
+    );
+}
+
 fn draw_log(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let visible = area.height.saturating_sub(2) as usize;
     let log = app.log.lock();
@@ -549,7 +595,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(Color::Black).bg(Color::Green),
         )),
         None => Line::from(Span::styled(
-            " tab view · j/k move · space mark · s stage · S all · u unstage · c commit · p push · y sync · r refresh · ? help · q quit",
+            " tab view · j/k move · space mark · d diff · s stage · S all · u unstage · c commit · p push · y sync · r refresh · ? help · q quit",
             Style::new().fg(Color::DarkGray),
         )),
     };
@@ -611,6 +657,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("j k ↑ ↓", "move selection"),
         ("g G", "jump to first / last"),
         ("space", "mark the file for the next stage or unstage"),
+        ("d", "diff the marked files, or the selected one"),
         ("s", "stage the marked files, or the selected one"),
         ("S", "scan the working copy and stage everything"),
         ("u", "unstage the marked files, or the selected one"),

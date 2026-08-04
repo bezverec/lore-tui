@@ -97,8 +97,9 @@ cache and reloads.
 
 The natural next steps, in rough order of effort:
 
-- **Diff view** — `file::diff` exists and streams the same way; it needs a scrollable pane
-  and syntax-free hunk rendering.
+- **Diff between two revisions** — `file::diff` already takes a source and a target
+  revision; the diff view leaves both empty, which Lore reads as "current revision" and
+  "current filesystem state". Wiring the history view to it would give per-revision diffs.
 - **Branch view** — `branch::list` covers the local repository, including remote branches
   and their latest revisions.
 - **Clone from the browser** — `repository::clone` streams progress events that map onto the
