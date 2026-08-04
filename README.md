@@ -42,6 +42,10 @@ Three views, switched with `tab` or `1` `2` `3`:
 copy against the current revision. It is reached from the status view rather than the view
 cycle, and `d`, `esc` or `q` returns.
 
+File locks — the answer to binary assets that cannot be merged — are shown as an `L` column in
+the status list, with the owner and time in the detail pane. `l` locks and `L` releases,
+across the marked files or the selected one.
+
 Actions available from the status view: stage, unstage, commit, push and sync. Files can be
 marked with `space` and staged or unstaged as a batch; with nothing marked the action applies
 to the selected file. Push and sync ask for confirmation first. The bottom pane streams the
@@ -53,6 +57,7 @@ events of whatever is running.
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
 | `space` | mark the file for the next stage, unstage or diff |
 | `d` | diff the marked files, or the selected one; `d`, `esc` or `q` closes it |
+| `l` / `L` | lock / unlock the marked files, or the selected one |
 | `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |
 | `u` | unstage the marked files, or the selected one when nothing is marked |
@@ -124,6 +129,10 @@ If the Lore server also runs in Docker, put the container on the same network (`
   standing in.
 - **Diffs between revisions.** `d` diffs the working copy against the current revision;
   picking two arbitrary revisions is not wired up, though `file::diff` takes them.
+- **Locking a file with no changes.** Locks are driven from the status list, which only holds
+  files that differ from the current revision. Locking an untouched file needs the CLI.
+- **Telling your locks from everyone else's.** Both render the same; the owner is in the
+  detail pane. On a server without authentication every lock reads as `<unknown>`.
 - **Concurrent operations.** One Lore call runs at a time; the rest queue behind it.
 
 ## How it works

@@ -115,6 +115,15 @@ impl HistoryEntry {
     }
 }
 
+/// A file lock held on the current branch.
+#[derive(Clone, Debug)]
+pub struct LockEntry {
+    pub path: String,
+    pub owner: String,
+    /// Milliseconds since the Unix epoch.
+    pub locked_at: u64,
+}
+
 /// A unified diff for one file, as Lore renders it.
 #[derive(Clone, Debug)]
 pub struct DiffEntry {
@@ -150,6 +159,7 @@ pub enum OpResult {
     Status(Result<StatusSnapshot, String>),
     History(Result<Vec<HistoryEntry>, String>),
     Diff(Result<Vec<DiffEntry>, String>),
+    Locks(Result<Vec<LockEntry>, String>),
     RemoteUrl(Result<String, String>),
     Repos(Result<Vec<RepoEntry>, String>),
     RepoInfo {
@@ -591,6 +601,123 @@ fn diff(
     Ok(entries)
 }
 
+/// Every lock on the current branch. Querying with all filters empty is one
+/// round trip for the whole repository, where `lock::file_status` would need
+/// the paths up front and answer only for those.
+fn locks(globals: LoreGlobalArgs, sink: &LogSink) -> Result<Vec<LockEntry>, String> {
+    let entries: Arc<Mutex<Vec<LockEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let collector = entries.clone();
+    let cb = callback(sink, &outcome, move |event| {
+        if let LoreEvent::LockFileQuery(data) = event {
+            collector.lock().push(LockEntry {
+                path: data.path.as_str().to_string(),
+                owner: data.owner.as_str().to_string(),
+                locked_at: data.locked_at,
+            });
+        }
+    });
+
+    let args = LoreLockFileQueryArgs {
+        branch: LoreString::from(""),
+        owner: LoreString::from(""),
+        path: LoreString::from(""),
+    };
+
+    lore::runtime().block_on(lore::lock::file_query(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(String::new())?;
+
+    let entries = std::mem::take(&mut *entries.lock());
+    Ok(entries)
+}
+
+fn lock(globals: LoreGlobalArgs, paths: Vec<String>, sink: &LogSink) -> Result<String, String> {
+    let acquired = Arc::new(Mutex::new(0u64));
+    let ignored = Arc::new(Mutex::new(false));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let counter = acquired.clone();
+    let already = ignored.clone();
+    let sink_clone = sink.clone();
+    let cb = callback(sink, &outcome, move |event| match event {
+        LoreEvent::LockFileAcquireBegin(data) => {
+            if data.ignored != 0 {
+                *already.lock() = true;
+            }
+        }
+        LoreEvent::LockFileAcquire(data) => {
+            *counter.lock() += 1;
+            log_push(&sink_clone, format!("locked {}", data.path.as_str()));
+        }
+        _ => {}
+    });
+
+    let args = LoreLockFileAcquireArgs {
+        paths: LoreArray::from_vec(paths.iter().map(LoreString::from).collect()),
+        branch: LoreString::from(""),
+    };
+
+    lore::runtime().block_on(lore::lock::file_acquire(globals, args, cb));
+
+    let count = *acquired.lock();
+    let ignored = *ignored.lock();
+    let outcome = std::mem::take(&mut *outcome.lock());
+    let summary = if ignored {
+        format!("already held the lock on {count} file(s)")
+    } else {
+        format!("locked {count} file(s)")
+    };
+
+    outcome.into_result(summary)
+}
+
+/// Release locks. An empty owner means "mine", which is the only release the
+/// TUI offers — taking someone else's lock is not a keystroke decision.
+fn unlock(globals: LoreGlobalArgs, paths: Vec<String>, sink: &LogSink) -> Result<String, String> {
+    let released = Arc::new(Mutex::new(0u64));
+    let missing = Arc::new(Mutex::new(false));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let counter = released.clone();
+    let not_found = missing.clone();
+    let sink_clone = sink.clone();
+    let cb = callback(sink, &outcome, move |event| match event {
+        LoreEvent::LockFileReleaseBegin(data) => {
+            if data.not_found != 0 {
+                *not_found.lock() = true;
+            }
+        }
+        LoreEvent::LockFileRelease(data) => {
+            *counter.lock() += 1;
+            log_push(&sink_clone, format!("unlocked {}", data.path.as_str()));
+        }
+        _ => {}
+    });
+
+    let args = LoreLockFileReleaseArgs {
+        paths: LoreArray::from_vec(paths.iter().map(LoreString::from).collect()),
+        branch: LoreString::from(""),
+        owner: LoreString::from(""),
+        owner_id: LoreString::from(""),
+    };
+
+    lore::runtime().block_on(lore::lock::file_release(globals, args, cb));
+
+    let count = *released.lock();
+    let missing = *missing.lock();
+    let outcome = std::mem::take(&mut *outcome.lock());
+    let summary = if missing {
+        "no lock held on those files".to_string()
+    } else {
+        format!("unlocked {count} file(s)")
+    };
+
+    outcome.into_result(summary)
+}
+
 /// Read the remote this working copy was created against, which is also the
 /// server whose repositories the browser lists. Empty when the repository has
 /// no remote configured.
@@ -686,6 +813,9 @@ pub enum Request {
     Status { scan: bool },
     History,
     Diff { paths: Vec<String> },
+    Locks,
+    Lock { paths: Vec<String> },
+    Unlock { paths: Vec<String> },
     RemoteUrl,
     Repos { url: String },
     RepoInfo { url: String, name: String },
@@ -702,6 +832,9 @@ impl Request {
             Request::Status { .. } => "status",
             Request::History => "history",
             Request::Diff { .. } => "diff",
+            Request::Locks => "locks",
+            Request::Lock { .. } => "lock",
+            Request::Unlock { .. } => "unlock",
             Request::RemoteUrl => "remote",
             Request::Repos { .. } => "repositories",
             Request::RepoInfo { .. } => "repository info",
@@ -734,6 +867,17 @@ pub fn spawn(
             Request::Status { scan } => OpResult::Status(status(globals, scan, &sink)),
             Request::History => OpResult::History(history(globals, 0, &sink)),
             Request::Diff { paths } => OpResult::Diff(diff(globals, paths, &sink)),
+            Request::Locks => OpResult::Locks(locks(globals, &sink)),
+            Request::Lock { paths } => OpResult::Action {
+                name,
+                result: lock(globals, paths, &sink),
+                reload_history: false,
+            },
+            Request::Unlock { paths } => OpResult::Action {
+                name,
+                result: unlock(globals, paths, &sink),
+                reload_history: false,
+            },
             Request::RemoteUrl => OpResult::RemoteUrl(remote_url(globals, &sink)),
             Request::Repos { url } => OpResult::Repos(repos(globals, url, &sink)),
             Request::RepoInfo { url, name } => OpResult::RepoInfo {

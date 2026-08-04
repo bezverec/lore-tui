@@ -21,6 +21,7 @@ use crate::ops;
 use crate::ops::DiffEntry;
 use crate::ops::FileEntry;
 use crate::ops::HistoryEntry;
+use crate::ops::LockEntry;
 use crate::ops::LogSink;
 use crate::ops::OpResult;
 use crate::ops::RepoEntry;
@@ -64,6 +65,9 @@ pub enum Row {
     File(Section, usize),
 }
 
+/// Actions that apply to a file whatever its staging state.
+const ALL_SECTIONS: [Section; 3] = [Section::Staged, Section::Unmerged, Section::Unstaged];
+
 /// What a file action should operate on.
 enum Targets {
     Paths(Vec<String>),
@@ -95,6 +99,8 @@ pub struct App {
     pub history_selected: usize,
     /// Server this working copy points at, and the one the browser lists.
     /// `None` until the config read lands; empty when there is no remote.
+    /// Locks on the current branch, keyed by the path they apply to.
+    pub locks: HashMap<String, LockEntry>,
     pub diff: Vec<DiffLine>,
     pub diff_title: String,
     pub diff_scroll: usize,
@@ -133,6 +139,7 @@ impl App {
             status_selected: 0,
             marked: HashSet::new(),
             history_selected: 0,
+            locks: HashMap::new(),
             diff: Vec::new(),
             diff_title: String::new(),
             diff_scroll: 0,
@@ -157,6 +164,7 @@ impl App {
         // flagged" would read as "nothing changed".
         app.dispatch(Request::Status { scan: true });
         app.dispatch(Request::History);
+        app.dispatch(Request::Locks);
         app.dispatch(Request::RemoteUrl);
         app
     }
@@ -238,6 +246,15 @@ impl App {
                 OpResult::Diff(Err(error)) => {
                     self.message = Some((format!("diff: {error}"), true));
                 }
+                OpResult::Locks(Ok(locks)) => {
+                    self.locks = locks
+                        .into_iter()
+                        .map(|lock| (lock.path.clone(), lock))
+                        .collect();
+                }
+                OpResult::Locks(Err(error)) => {
+                    self.message = Some((format!("locks: {error}"), true));
+                }
                 OpResult::RemoteUrl(Ok(url)) => {
                     self.remote = Some(url);
                     // The browser is only reachable once the server is known,
@@ -290,6 +307,9 @@ impl App {
                     self.dispatch(Request::Status { scan: true });
                     if reload_history {
                         self.dispatch(Request::History);
+                    }
+                    if matches!(name, "lock" | "unlock") {
+                        self.dispatch(Request::Locks);
                     }
                 }
             }
@@ -683,22 +703,37 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.select_edge(true),
             KeyCode::Char('G') | KeyCode::End => self.select_edge(false),
 
-            KeyCode::Char('r') => match self.view {
-                // A listing is only worth re-reading on request; the detail
-                // cache is cleared with it so stale entries do not survive.
-                View::Repos => {
+            KeyCode::Char('l') => match self.targets(&ALL_SECTIONS) {
+                Targets::Paths(paths) => self.dispatch(Request::Lock { paths }),
+                Targets::Empty | Targets::Inapplicable => {
+                    self.message = Some(("no file selected".into(), true));
+                }
+            },
+            KeyCode::Char('L') => match self.targets(&ALL_SECTIONS) {
+                Targets::Paths(paths) => self.dispatch(Request::Unlock { paths }),
+                Targets::Empty | Targets::Inapplicable => {
+                    self.message = Some(("no file selected".into(), true));
+                }
+            },
+
+            KeyCode::Char('r') => {
+                if self.view == View::Repos {
+                    // A listing is only worth re-reading on request; the detail
+                    // cache goes with it so stale entries do not survive.
                     self.repo_info.clear();
                     self.load_repos();
+                } else {
+                    self.dispatch(Request::Status { scan: true });
+                    self.dispatch(Request::Locks);
                 }
-                _ => self.dispatch(Request::Status { scan: true }),
-            },
+            }
             KeyCode::Char('R') => self.dispatch(Request::History),
 
             KeyCode::Char(' ') => self.toggle_mark(),
 
             KeyCode::Char('d') => {
                 if self.view == View::Status {
-                    match self.targets(&[Section::Staged, Section::Unmerged, Section::Unstaged]) {
+                    match self.targets(&ALL_SECTIONS) {
                         Targets::Paths(paths) => self.dispatch(Request::Diff { paths }),
                         Targets::Empty | Targets::Inapplicable => {
                             self.message = Some(("no file selected".into(), true));

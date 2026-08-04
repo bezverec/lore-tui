@@ -81,6 +81,11 @@ happens the conversion is inlined into the match arm, where the type is inferred
 **`repository::info` reports `created` in milliseconds**, although the field is documented as
 seconds. Read as seconds it puts every repository in the year 58558.
 
+**`lock::file_query` beats `lock::file_status` for a whole-repository view.** `file_status`
+answers for paths you name, so painting the lock column would mean sending every path in the
+list; `file_query` with empty branch, owner and path filters returns every lock on the branch
+in one call. Releasing with an empty owner means "mine".
+
 **The remote URL comes from the repository config.** `repository::config_get("remote_url")`
 returns what the working copy was created against — no need to parse `.lore/config.toml`.
 
@@ -105,5 +110,6 @@ The natural next steps, in rough order of effort:
 - **Clone from the browser** — `repository::clone` streams progress events that map onto the
   existing log pane; the open question is where the working copy lands and what the TUI does
   afterwards.
-- **File locking** — `lock` has acquire, release and status calls, which suits a keybinding
-  on the status list.
+- **Locks on files outside the status list** — the lock column is driven from the status
+  list, so an unchanged file cannot be locked from the TUI. A dedicated lock view built on
+  `lock::file_query` would cover it.

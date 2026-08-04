@@ -183,6 +183,7 @@ fn draw_status_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         continue;
                     };
                     let marked = app.is_marked(file);
+                    let locked = app.locks.contains_key(file.target());
                     items.push(ListItem::new(Line::from(vec![
                         Span::styled(
                             if marked { " ✓ " } else { "   " },
@@ -192,7 +193,10 @@ fn draw_status_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                             file.action.to_string(),
                             Style::new().fg(section_color(section)),
                         ),
-                        Span::raw("  "),
+                        Span::styled(
+                            if locked { " L " } else { "   " },
+                            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(
                             file.path.clone(),
                             if marked {
@@ -274,6 +278,20 @@ fn draw_status_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
                             Style::new().fg(Color::Red),
                         )));
                     }
+                }
+            }
+
+            if let Some(lock) = app.locks.get(path) {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(Span::styled(
+                    "locked",
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )));
+                if !lock.owner.is_empty() {
+                    lines.push(Line::raw(format!("by {}", lock.owner)));
+                }
+                if lock.locked_at > 0 {
+                    lines.push(Line::raw(format_time(lock.locked_at)));
                 }
             }
         }
@@ -595,7 +613,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(Color::Black).bg(Color::Green),
         )),
         None => Line::from(Span::styled(
-            " tab view · j/k move · space mark · d diff · s stage · S all · u unstage · c commit · p push · y sync · r refresh · ? help · q quit",
+            " tab view · j/k move · space mark · d diff · s stage · u unstage · l/L lock · c commit · p push · y sync · r refresh · ? help · q quit",
             Style::new().fg(Color::DarkGray),
         )),
     };
@@ -658,6 +676,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("g G", "jump to first / last"),
         ("space", "mark the file for the next stage or unstage"),
         ("d", "diff the marked files, or the selected one"),
+        ("l / L", "lock / unlock the marked files, or the selected one"),
         ("s", "stage the marked files, or the selected one"),
         ("S", "scan the working copy and stage everything"),
         ("u", "unstage the marked files, or the selected one"),
