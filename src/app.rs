@@ -18,6 +18,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::event::KeyModifiers;
 
 use crate::ops;
+use crate::ops::BranchEntry;
 use crate::ops::DiffEntry;
 use crate::ops::FileEntry;
 use crate::ops::HistoryEntry;
@@ -36,6 +37,7 @@ use crate::ops::StatusSnapshot;
 pub enum View {
     Status,
     History,
+    Branches,
     Repos,
     /// Reached with `d` from the status view rather than the view cycle, since
     /// it shows one specific diff rather than a standing list.
@@ -90,9 +92,25 @@ enum Targets {
     Inapplicable,
 }
 
+/// What a text prompt is collecting.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    CommitMessage,
+    BranchName,
+}
+
+impl InputKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            InputKind::CommitMessage => " Commit message ",
+            InputKind::BranchName => " New branch name ",
+        }
+    }
+}
+
 pub enum Modal {
     None,
-    Commit { message: String },
+    Input { kind: InputKind, value: String },
     Confirm { request: Option<Request>, prompt: String },
     Help,
 }
@@ -113,6 +131,8 @@ pub struct App {
     /// `None` until the config read lands; empty when there is no remote.
     /// Locks on the current branch, keyed by the path they apply to.
     pub locks: HashMap<String, LockEntry>,
+    pub branches: Vec<BranchEntry>,
+    pub branches_selected: usize,
     /// Push notifications waiting to be folded into the state.
     notices: NoticeSink,
     /// Whether the server is pushing changes to us.
@@ -156,6 +176,8 @@ impl App {
             marked: HashSet::new(),
             history_selected: 0,
             locks: HashMap::new(),
+            branches: Vec::new(),
+            branches_selected: 0,
             notices: Arc::new(Mutex::new(Vec::new())),
             live: false,
             diff: Vec::new(),
@@ -183,6 +205,7 @@ impl App {
         app.dispatch(Request::Status { scan: true });
         app.dispatch(Request::History);
         app.dispatch(Request::Locks);
+        app.dispatch(Request::Branches);
         app.dispatch(Request::RemoteUrl);
         app.dispatch(Request::Subscribe {
             notices: app.notices.clone(),
@@ -276,6 +299,15 @@ impl App {
                 OpResult::Locks(Err(error)) => {
                     self.message = Some((format!("locks: {error}"), true));
                 }
+                OpResult::Branches(Ok(branches)) => {
+                    self.branches = branches;
+                    self.branches_selected = self
+                        .branches_selected
+                        .min(self.branches.len().saturating_sub(1));
+                }
+                OpResult::Branches(Err(error)) => {
+                    self.message = Some((format!("branches: {error}"), true));
+                }
                 OpResult::RemoteUrl(Ok(url)) => {
                     self.remote = Some(url);
                     // The browser is only reachable once the server is known,
@@ -337,6 +369,9 @@ impl App {
                     if matches!(name, "lock" | "unlock") {
                         self.dispatch(Request::Locks);
                     }
+                    if matches!(name, "switch branch" | "create branch") {
+                        self.dispatch(Request::Branches);
+                    }
                 }
             }
         }
@@ -357,6 +392,7 @@ impl App {
 
         let mut refresh_status = false;
         let mut refresh_locks = false;
+        let mut refresh_branches = false;
 
         for notice in notices {
             match notice {
@@ -374,8 +410,14 @@ impl App {
                     );
                     refresh_status = true;
                 }
-                Notice::BranchCreated => ops::log_push(&self.log, "[live] branch created"),
-                Notice::BranchDeleted => ops::log_push(&self.log, "[live] branch deleted"),
+                Notice::BranchCreated => {
+                    ops::log_push(&self.log, "[live] branch created");
+                    refresh_branches = true;
+                }
+                Notice::BranchDeleted => {
+                    ops::log_push(&self.log, "[live] branch deleted");
+                    refresh_branches = true;
+                }
                 Notice::Locked { paths, user } => {
                     ops::log_push(
                         &self.log,
@@ -400,6 +442,9 @@ impl App {
         }
         if refresh_locks {
             self.dispatch(Request::Locks);
+        }
+        if refresh_branches {
+            self.dispatch(Request::Branches);
         }
     }
 
@@ -506,6 +551,10 @@ impl App {
 
     pub fn selected_repo(&self) -> Option<&RepoEntry> {
         self.repos.get(self.repos_selected)
+    }
+
+    pub fn selected_branch(&self) -> Option<&BranchEntry> {
+        self.branches.get(self.branches_selected)
     }
 
     /// Switch views, loading the repository list the first time the browser is
@@ -666,6 +715,14 @@ impl App {
                 let index = (self.repos_selected as isize + delta).clamp(0, last);
                 self.repos_selected = index as usize;
             }
+            View::Branches => {
+                if self.branches.is_empty() {
+                    return;
+                }
+                let last = self.branches.len() as isize - 1;
+                let index = (self.branches_selected as isize + delta).clamp(0, last);
+                self.branches_selected = index as usize;
+            }
             View::Diff => {
                 let last = self.diff_max_scroll() as isize;
                 let offset = (self.diff_scroll as isize + delta).clamp(0, last);
@@ -696,6 +753,13 @@ impl App {
                     self.repos.len().saturating_sub(1)
                 };
             }
+            View::Branches => {
+                self.branches_selected = if first {
+                    0
+                } else {
+                    self.branches.len().saturating_sub(1)
+                };
+            }
             View::Diff => {
                 self.diff_scroll = if first { 0 } else { self.diff_max_scroll() };
             }
@@ -709,21 +773,31 @@ impl App {
         }
 
         match &mut self.modal {
-            Modal::Commit { message } => match key.code {
+            Modal::Input { kind, value } => match key.code {
                 KeyCode::Esc => self.modal = Modal::None,
                 KeyCode::Enter => {
-                    let message = message.trim().to_string();
+                    let kind = *kind;
+                    let value = value.trim().to_string();
                     self.modal = Modal::None;
-                    if message.is_empty() {
-                        self.message = Some(("commit needs a message".into(), true));
-                    } else {
-                        self.dispatch(Request::Commit { message });
+                    match (kind, value.is_empty()) {
+                        (InputKind::CommitMessage, true) => {
+                            self.message = Some(("commit needs a message".into(), true));
+                        }
+                        (InputKind::CommitMessage, false) => {
+                            self.dispatch(Request::Commit { message: value });
+                        }
+                        (InputKind::BranchName, true) => {
+                            self.message = Some(("branch needs a name".into(), true));
+                        }
+                        (InputKind::BranchName, false) => {
+                            self.dispatch(Request::CreateBranch { name: value });
+                        }
                     }
                 }
                 KeyCode::Backspace => {
-                    message.pop();
+                    value.pop();
                 }
-                KeyCode::Char(c) => message.push(c),
+                KeyCode::Char(c) => value.push(c),
                 _ => {}
             },
             Modal::Confirm { request, .. } => match key.code {
@@ -770,7 +844,8 @@ impl App {
             KeyCode::Tab => {
                 let next = match self.view {
                     View::Status => View::History,
-                    View::History => View::Repos,
+                    View::History => View::Branches,
+                    View::Branches => View::Repos,
                     // The diff is outside the cycle; tab leaves it.
                     View::Repos | View::Diff => View::Status,
                 };
@@ -778,7 +853,8 @@ impl App {
             }
             KeyCode::Char('1') => self.show(View::Status),
             KeyCode::Char('2') => self.show(View::History),
-            KeyCode::Char('3') => self.show(View::Repos),
+            KeyCode::Char('3') => self.show(View::Branches),
+            KeyCode::Char('4') => self.show(View::Repos),
 
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
@@ -806,6 +882,8 @@ impl App {
                     // cache goes with it so stale entries do not survive.
                     self.repo_info.clear();
                     self.load_repos();
+                } else if self.view == View::Branches {
+                    self.dispatch(Request::Branches);
                 } else {
                     self.dispatch(Request::Status { scan: true });
                     self.dispatch(Request::Locks);
@@ -856,8 +934,34 @@ impl App {
             },
 
             KeyCode::Char('c') => {
-                self.modal = Modal::Commit {
-                    message: String::new(),
+                self.modal = Modal::Input {
+                    kind: InputKind::CommitMessage,
+                    value: String::new(),
+                }
+            }
+            KeyCode::Char('n') => {
+                if self.view == View::Branches {
+                    self.modal = Modal::Input {
+                        kind: InputKind::BranchName,
+                        value: String::new(),
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if self.view == View::Branches {
+                    match self.selected_branch() {
+                        Some(branch) if branch.current => {
+                            self.message = Some(("already on this branch".into(), true));
+                        }
+                        Some(branch) => {
+                            let name = branch.name.clone();
+                            self.modal = Modal::Confirm {
+                                request: Some(Request::SwitchBranch { name: name.clone() }),
+                                prompt: format!("Switch the working copy to {name}?"),
+                            };
+                        }
+                        None => self.message = Some(("no branch selected".into(), true)),
+                    }
                 }
             }
             KeyCode::Char('p') => {

@@ -98,6 +98,13 @@ Notifications say that something moved, not what it moved to, so each kind turns
 read that answers it: a push refreshes the status without a filesystem scan (the remote moved,
 the working copy did not), a lock or unlock refreshes the lock list.
 
+**`branch::create` switches to the branch it creates.** There is no separate switch step to
+take afterwards, and the branch list has to be re-read either way.
+
+**Switching does not reset local changes.** `LoreBranchSwitchArgs::reset` would make the
+incoming revision overwrite modified files; the branch view leaves it off, so a switch that
+would lose work fails instead of succeeding quietly.
+
 **The remote URL comes from the repository config.** `repository::config_get("remote_url")`
 returns what the working copy was created against — no need to parse `.lore/config.toml`.
 
@@ -117,8 +124,9 @@ The natural next steps, in rough order of effort:
 - **Diff between two revisions** — `file::diff` already takes a source and a target
   revision; the diff view leaves both empty, which Lore reads as "current revision" and
   "current filesystem state". Wiring the history view to it would give per-revision diffs.
-- **Branch view** — `branch::list` covers the local repository, including remote branches
-  and their latest revisions.
+- **Merge workflow** — `branch::merge_start`, `merge_into`, `merge_resolve`,
+  `merge_resolve_mine` / `_theirs` and `merge_abort`. The status view already separates an
+  `Unmerged` section and reads `flag_conflict_unresolved`, so the display side has a start.
 - **Clone from the browser** — `repository::clone` streams progress events that map onto the
   existing log pane; the open question is where the working copy lands and what the TUI does
   afterwards.

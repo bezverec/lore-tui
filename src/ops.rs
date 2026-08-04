@@ -116,6 +116,21 @@ impl HistoryEntry {
     }
 }
 
+/// A branch, as `branch::list` reports it. The same name can appear twice, once
+/// per location, when a local branch also exists on the server.
+#[derive(Clone, Debug)]
+pub struct BranchEntry {
+    pub name: String,
+    pub category: String,
+    pub latest: String,
+    pub creator: String,
+    /// Milliseconds since the Unix epoch.
+    pub created: u64,
+    pub current: bool,
+    pub archived: bool,
+    pub remote: bool,
+}
+
 /// A push notification from the server.
 #[derive(Clone, Debug)]
 pub enum Notice {
@@ -175,6 +190,7 @@ pub enum OpResult {
     History(Result<Vec<HistoryEntry>, String>),
     Diff(Result<Vec<DiffEntry>, String>),
     Locks(Result<Vec<LockEntry>, String>),
+    Branches(Result<Vec<BranchEntry>, String>),
     RemoteUrl(Result<String, String>),
     Repos(Result<Vec<RepoEntry>, String>),
     RepoInfo {
@@ -733,6 +749,87 @@ fn unlock(globals: LoreGlobalArgs, paths: Vec<String>, sink: &LogSink) -> Result
     outcome.into_result(summary)
 }
 
+fn branches(globals: LoreGlobalArgs, sink: &LogSink) -> Result<Vec<BranchEntry>, String> {
+    let entries: Arc<Mutex<Vec<BranchEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let collector = entries.clone();
+    let cb = callback(sink, &outcome, move |event| {
+        if let LoreEvent::BranchListEntry(data) = event {
+            collector.lock().push(BranchEntry {
+                name: data.name.as_str().to_string(),
+                category: data.category.as_str().to_string(),
+                latest: data.latest.to_string(),
+                creator: data.creator.as_str().to_string(),
+                created: data.created,
+                current: data.is_current != 0,
+                archived: data.archived != 0,
+                remote: data.location == LoreBranchLocation::Remote,
+            });
+        }
+    });
+
+    let args = LoreBranchListArgs { archived: 0 };
+
+    lore::runtime().block_on(lore::branch::list(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(String::new())?;
+
+    let mut entries = std::mem::take(&mut *entries.lock());
+    // Local first, then by name, so the branch you are on sits with the ones
+    // you can switch to rather than among the server's copies.
+    entries.sort_by(|left, right| {
+        left.remote
+            .cmp(&right.remote)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(entries)
+}
+
+fn switch_branch(
+    globals: LoreGlobalArgs,
+    name: String,
+    sink: &LogSink,
+) -> Result<String, String> {
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+    let cb = callback(sink, &outcome, |_| {});
+
+    let args = LoreBranchSwitchArgs {
+        branch: LoreString::from(&name),
+        revision: LoreString::from(""),
+        // Local modifications are the user's work; a branch switch must not
+        // quietly throw them away.
+        reset: 0,
+        bare: 0,
+    };
+
+    lore::runtime().block_on(lore::branch::switch(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(format!("switched to {name}"))
+}
+
+fn create_branch(
+    globals: LoreGlobalArgs,
+    name: String,
+    sink: &LogSink,
+) -> Result<String, String> {
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+    let cb = callback(sink, &outcome, |_| {});
+
+    let args = LoreBranchCreateArgs {
+        branch: LoreString::from(&name),
+        category: LoreString::from(""),
+        id: LoreString::from(""),
+    };
+
+    lore::runtime().block_on(lore::branch::create(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(format!("created branch {name}"))
+}
+
 /// Subscribe to server push notifications.
 ///
 /// The call returns as soon as the subscription is registered; it does not
@@ -889,6 +986,9 @@ pub enum Request {
     Lock { paths: Vec<String> },
     Unlock { paths: Vec<String> },
     Subscribe { notices: NoticeSink },
+    Branches,
+    SwitchBranch { name: String },
+    CreateBranch { name: String },
     RemoteUrl,
     Repos { url: String },
     RepoInfo { url: String, name: String },
@@ -909,6 +1009,9 @@ impl Request {
             Request::Lock { .. } => "lock",
             Request::Unlock { .. } => "unlock",
             Request::Subscribe { .. } => "subscribe",
+            Request::Branches => "branches",
+            Request::SwitchBranch { .. } => "switch branch",
+            Request::CreateBranch { .. } => "create branch",
             Request::RemoteUrl => "remote",
             Request::Repos { .. } => "repositories",
             Request::RepoInfo { .. } => "repository info",
@@ -955,6 +1058,17 @@ pub fn spawn(
             Request::Subscribe { notices } => OpResult::Action {
                 name,
                 result: subscribe(globals, notices, &sink),
+                reload_history: false,
+            },
+            Request::Branches => OpResult::Branches(branches(globals, &sink)),
+            Request::SwitchBranch { name: branch } => OpResult::Action {
+                name,
+                result: switch_branch(globals, branch, &sink),
+                reload_history: true,
+            },
+            Request::CreateBranch { name: branch } => OpResult::Action {
+                name,
+                result: create_branch(globals, branch, &sink),
                 reload_history: false,
             },
             Request::RemoteUrl => OpResult::RemoteUrl(remote_url(globals, &sink)),

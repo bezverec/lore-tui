@@ -89,6 +89,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             draw_history_list(frame, app, left);
             draw_history_detail(frame, app, right);
         }
+        View::Branches => {
+            draw_branches_list(frame, app, left);
+            draw_branches_detail(frame, app, right);
+        }
         View::Repos => {
             draw_repos_list(frame, app, left);
             draw_repos_detail(frame, app, right);
@@ -102,7 +106,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     match &app.modal {
         Modal::None => {}
-        Modal::Commit { message } => draw_commit(frame, message),
+        Modal::Input { kind, value } => draw_input(frame, kind.title(), value),
         Modal::Confirm { prompt, .. } => draw_confirm(frame, prompt),
         Modal::Help => draw_help(frame),
     }
@@ -397,6 +401,121 @@ fn draw_history_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn draw_branches_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .branches
+        .iter()
+        .map(|branch| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if branch.current { " ● " } else { "   " },
+                    Style::new().fg(Color::Green),
+                ),
+                Span::styled(
+                    branch.name.clone(),
+                    if branch.current {
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new()
+                    },
+                ),
+                Span::styled(
+                    if branch.remote { "  remote" } else { "" },
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+
+    let items = if items.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  no branches",
+            Style::new().fg(Color::DarkGray),
+        )))]
+    } else {
+        items
+    };
+
+    let list = List::new(items)
+        .block(Block::bordered().title(" Branches "))
+        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.branches.is_empty() {
+        state.select(Some(app.branches_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_branches_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    match app.selected_branch() {
+        Some(branch) => {
+            lines.push(Line::from(vec![
+                Span::styled("name    ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    branch.name.clone(),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("where   ", Style::new().fg(Color::DarkGray)),
+                Span::raw(if branch.remote { "remote" } else { "local" }),
+            ]));
+            if !branch.category.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("category", Style::new().fg(Color::DarkGray)),
+                    Span::raw(format!(" {}", branch.category)),
+                ]));
+            }
+            if !branch.creator.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("creator ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(branch.creator.clone()),
+                ]));
+            }
+            if branch.created > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("created ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(format_time(branch.created)),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("latest  ", Style::new().fg(Color::DarkGray)),
+                Span::raw(branch.latest.clone()),
+            ]));
+            if branch.archived {
+                lines.push(Line::from(Span::styled(
+                    "archived",
+                    Style::new().fg(Color::Yellow),
+                )));
+            }
+
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                if branch.current {
+                    "on this branch"
+                } else {
+                    "enter to switch · n for a new branch"
+                },
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        None => lines.push(Line::from(Span::styled(
+            "no branch selected",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Branch "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn draw_repos_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // The repository this working copy belongs to gets a marker, so the
     // browser doubles as "where am I on this server".
@@ -615,7 +734,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(Color::Black).bg(Color::Green),
         )),
         None => Line::from(Span::styled(
-            " tab view · j/k move · space mark · d diff · s stage · u unstage · l/L lock · c commit · p push · y sync · r refresh · ? help · q quit",
+            " tab view · j/k move · space mark · d diff · s stage · u unstage · l/L lock · c commit · p push · y sync · r refresh · ? keys · q quit",
             Style::new().fg(Color::DarkGray),
         )),
     };
@@ -635,19 +754,19 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn draw_commit(frame: &mut Frame<'_>, message: &str) {
+fn draw_input(frame: &mut Frame<'_>, title: &str, value: &str) {
     let area = centered(frame.area(), 70, 5);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(format!("{message}_")),
+            Line::from(format!("{value}_")),
             Line::raw(""),
             Line::from(Span::styled(
-                "enter commit · esc cancel",
+                "enter confirm · esc cancel",
                 Style::new().fg(Color::DarkGray),
             )),
         ])
-        .block(Block::bordered().title(" Commit message "))
+        .block(Block::bordered().title(title.to_string()))
         .wrap(Wrap { trim: false }),
         area,
     );
@@ -673,7 +792,7 @@ fn draw_confirm(frame: &mut Frame<'_>, prompt: &str) {
 
 fn draw_help(frame: &mut Frame<'_>) {
     let keys = [
-        ("tab / 1 2 3", "switch status, history, repositories"),
+        ("tab / 1..4", "status, history, branches, repositories"),
         ("j k ↑ ↓", "move selection"),
         ("g G", "jump to first / last"),
         ("space", "mark the file for the next stage or unstage"),
@@ -685,7 +804,8 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("c", "commit the staged revision"),
         ("p", "push to the remote"),
         ("y", "sync to the branch tip"),
-        ("r / R", "refresh status or repositories / history"),
+        ("enter / n", "branches: switch to / create a branch"),
+        ("r / R", "refresh the current list / the history"),
         ("esc", "clear the marks, or dismiss the status message"),
         ("q / ctrl-c", "quit"),
     ];
