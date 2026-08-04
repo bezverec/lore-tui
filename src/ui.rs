@@ -109,10 +109,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let title = if app.busy() {
-        format!(" lore {} ", SPINNER[app.spinner % SPINNER.len()])
-    } else {
-        " lore ".to_string()
+    let title = match (app.busy(), app.live) {
+        (true, true) => format!(" lore ● {} ", SPINNER[app.spinner % SPINNER.len()]),
+        (true, false) => format!(" lore {} ", SPINNER[app.spinner % SPINNER.len()]),
+        (false, true) => " lore ● ".to_string(),
+        (false, false) => " lore ".to_string(),
     };
 
     let mut lines = vec![Line::from(vec![
@@ -132,10 +133,9 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled("revision ", Style::new().fg(Color::DarkGray)),
                 Span::raw(format!("{}", status.revision_number)),
                 Span::raw("  "),
-                Span::styled("remote ", Style::new().fg(Color::DarkGray)),
                 Span::styled(
                     status.remote_state().to_string(),
-                    Style::new().fg(if status.remote_state() == "in sync" {
+                    Style::new().fg(if status.remote_state() == "in sync with remote" {
                         Color::Green
                     } else {
                         Color::Yellow
@@ -587,6 +587,8 @@ fn draw_log(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::new().fg(Color::Red)
             } else if line.starts_with("[warn]") {
                 Style::new().fg(Color::Yellow)
+            } else if line.starts_with("[live]") {
+                Style::new().fg(Color::Magenta)
             } else if line.starts_with('>') || line.starts_with('<') {
                 Style::new().fg(Color::Cyan)
             } else {

@@ -78,23 +78,24 @@ pub struct StatusSnapshot {
 }
 
 impl StatusSnapshot {
-    /// Where the local branch sits against the remote. Rendered after a
-    /// "remote" label, so the text does not repeat the word.
+    /// Where the local branch sits against the remote. The phrase says which
+    /// side is which: "behind" alone, under a "remote" label, reads as though
+    /// the remote is the one lagging.
     pub fn remote_state(&self) -> &'static str {
         if !self.remote_available {
-            "unavailable"
+            "remote unavailable"
         } else if !self.remote_authorized {
-            "not authorized"
+            "remote not authorized"
         } else if !self.remote_branch_exist {
-            "branch missing"
+            "remote branch missing"
         } else if self.local_ahead && self.remote_ahead {
-            "diverged"
+            "diverged from remote"
         } else if self.local_ahead {
-            "ahead"
+            "ahead of remote"
         } else if self.remote_ahead {
-            "behind"
+            "behind remote"
         } else {
-            "in sync"
+            "in sync with remote"
         }
     }
 }
@@ -114,6 +115,20 @@ impl HistoryEntry {
         self.message.lines().next().unwrap_or("")
     }
 }
+
+/// A push notification from the server.
+#[derive(Clone, Debug)]
+pub enum Notice {
+    Subscribed,
+    BranchPushed { revision_number: u64, user: String },
+    BranchCreated,
+    BranchDeleted,
+    Locked { paths: Vec<String>, user: String },
+    Unlocked { paths: Vec<String>, user: String },
+}
+
+/// Where push notifications accumulate between frames.
+pub type NoticeSink = Arc<Mutex<Vec<Notice>>>;
 
 /// A file lock held on the current branch.
 #[derive(Clone, Debug)]
@@ -718,6 +733,63 @@ fn unlock(globals: LoreGlobalArgs, paths: Vec<String>, sink: &LogSink) -> Result
     outcome.into_result(summary)
 }
 
+/// Subscribe to server push notifications.
+///
+/// The call returns as soon as the subscription is registered; it does not
+/// block for the lifetime of the stream. Lore keeps delivering events to this
+/// callback afterwards because `LORE_CONTEXT` — which carries the event
+/// dispatcher, and therefore this callback — is a task-local that Lore
+/// propagates into the background task reading the notification stream. So the
+/// callback outlives the call, and writes into a sink the UI drains per frame
+/// rather than into anything tied to this request.
+fn subscribe(
+    globals: LoreGlobalArgs,
+    notices: NoticeSink,
+    sink: &LogSink,
+) -> Result<String, String> {
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let cb = callback(sink, &outcome, move |event| {
+        let notice = match event {
+            LoreEvent::NotificationSubscribed(_) => Notice::Subscribed,
+            LoreEvent::NotificationBranchPushed(data) => Notice::BranchPushed {
+                revision_number: data.revision_number,
+                user: data.user_id.as_str().to_string(),
+            },
+            LoreEvent::NotificationBranchCreated(_) => Notice::BranchCreated,
+            LoreEvent::NotificationBranchDeleted(_) => Notice::BranchDeleted,
+            LoreEvent::NotificationResourceLocked(data) => Notice::Locked {
+                paths: data
+                    .paths
+                    .as_slice()
+                    .iter()
+                    .map(|path| path.as_str().to_string())
+                    .collect(),
+                user: data.user_id.as_str().to_string(),
+            },
+            LoreEvent::NotificationResourceUnlocked(data) => Notice::Unlocked {
+                paths: data
+                    .paths
+                    .as_slice()
+                    .iter()
+                    .map(|path| path.as_str().to_string())
+                    .collect(),
+                user: data.user_id.as_str().to_string(),
+            },
+            _ => return,
+        };
+
+        notices.lock().push(notice);
+    });
+
+    let args = LoreNotificationSubscribeArgs {};
+
+    lore::runtime().block_on(lore::notification::subscribe(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result("subscribed to server notifications".to_string())
+}
+
 /// Read the remote this working copy was created against, which is also the
 /// server whose repositories the browser lists. Empty when the repository has
 /// no remote configured.
@@ -816,6 +888,7 @@ pub enum Request {
     Locks,
     Lock { paths: Vec<String> },
     Unlock { paths: Vec<String> },
+    Subscribe { notices: NoticeSink },
     RemoteUrl,
     Repos { url: String },
     RepoInfo { url: String, name: String },
@@ -835,6 +908,7 @@ impl Request {
             Request::Locks => "locks",
             Request::Lock { .. } => "lock",
             Request::Unlock { .. } => "unlock",
+            Request::Subscribe { .. } => "subscribe",
             Request::RemoteUrl => "remote",
             Request::Repos { .. } => "repositories",
             Request::RepoInfo { .. } => "repository info",
@@ -876,6 +950,11 @@ pub fn spawn(
             Request::Unlock { paths } => OpResult::Action {
                 name,
                 result: unlock(globals, paths, &sink),
+                reload_history: false,
+            },
+            Request::Subscribe { notices } => OpResult::Action {
+                name,
+                result: subscribe(globals, notices, &sink),
                 reload_history: false,
             },
             Request::RemoteUrl => OpResult::RemoteUrl(remote_url(globals, &sink)),

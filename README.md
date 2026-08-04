@@ -46,6 +46,10 @@ File locks — the answer to binary assets that cannot be merged — are shown a
 the status list, with the owner and time in the detail pane. `l` locks and `L` releases,
 across the marked files or the selected one.
 
+The TUI subscribes to server push notifications, marked by a `●` in the header. When someone
+else pushes or locks a file, the header and the lock column follow along on their own — no
+refresh key. A server without a notification service just leaves the `●` off.
+
 Actions available from the status view: stage, unstage, commit, push and sync. Files can be
 marked with `space` and staged or unstaged as a batch; with nothing marked the action applies
 to the selected file. Push and sync ask for confirmation first. The bottom pane streams the
@@ -133,7 +137,8 @@ If the Lore server also runs in Docker, put the container on the same network (`
   files that differ from the current revision. Locking an untouched file needs the CLI.
 - **Telling your locks from everyone else's.** Both render the same; the owner is in the
   detail pane. On a server without authentication every lock reads as `<unknown>`.
-- **Concurrent operations.** One Lore call runs at a time; the rest queue behind it.
+- **Concurrent operations.** One Lore call runs at a time; the rest queue behind it. Push
+  notifications are the exception — they arrive outside the queue.
 
 ## How it works
 

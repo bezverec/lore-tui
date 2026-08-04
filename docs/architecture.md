@@ -86,6 +86,18 @@ answers for paths you name, so painting the lock column would mean sending every
 list; `file_query` with empty branch, owner and path filters returns every lock on the branch
 in one call. Releasing with an empty owner means "mine".
 
+**`notification::subscribe` returns immediately, and the callback outlives it.** It registers
+a subscription rather than blocking for the lifetime of the stream, so no long-running
+request is needed and the queue keeps its one-at-a-time rule. Events keep arriving at the
+callback afterwards because `LORE_CONTEXT` — the task-local carrying the event dispatcher,
+and therefore the callback — is propagated into the background task that reads the stream.
+The callback writes into a sink the UI drains per frame, not into anything tied to the
+request that created it.
+
+Notifications say that something moved, not what it moved to, so each kind turns into the
+read that answers it: a push refreshes the status without a filesystem scan (the remote moved,
+the working copy did not), a lock or unlock refreshes the lock list.
+
 **The remote URL comes from the repository config.** `repository::config_get("remote_url")`
 returns what the working copy was created against — no need to parse `.lore/config.toml`.
 

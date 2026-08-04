@@ -23,6 +23,8 @@ use crate::ops::FileEntry;
 use crate::ops::HistoryEntry;
 use crate::ops::LockEntry;
 use crate::ops::LogSink;
+use crate::ops::Notice;
+use crate::ops::NoticeSink;
 use crate::ops::OpResult;
 use crate::ops::RepoEntry;
 use crate::ops::RepoInfo;
@@ -65,6 +67,16 @@ pub enum Row {
     File(Section, usize),
 }
 
+/// Attribution suffix for a notification, omitted when the server does not
+/// know who acted — which is every notification on a server without auth.
+fn by(user: &str) -> String {
+    if user.is_empty() || user == "<unknown>" {
+        String::new()
+    } else {
+        format!(" by {user}")
+    }
+}
+
 /// Actions that apply to a file whatever its staging state.
 const ALL_SECTIONS: [Section; 3] = [Section::Staged, Section::Unmerged, Section::Unstaged];
 
@@ -101,6 +113,10 @@ pub struct App {
     /// `None` until the config read lands; empty when there is no remote.
     /// Locks on the current branch, keyed by the path they apply to.
     pub locks: HashMap<String, LockEntry>,
+    /// Push notifications waiting to be folded into the state.
+    notices: NoticeSink,
+    /// Whether the server is pushing changes to us.
+    pub live: bool,
     pub diff: Vec<DiffLine>,
     pub diff_title: String,
     pub diff_scroll: usize,
@@ -140,6 +156,8 @@ impl App {
             marked: HashSet::new(),
             history_selected: 0,
             locks: HashMap::new(),
+            notices: Arc::new(Mutex::new(Vec::new())),
+            live: false,
             diff: Vec::new(),
             diff_title: String::new(),
             diff_scroll: 0,
@@ -166,6 +184,9 @@ impl App {
         app.dispatch(Request::History);
         app.dispatch(Request::Locks);
         app.dispatch(Request::RemoteUrl);
+        app.dispatch(Request::Subscribe {
+            notices: app.notices.clone(),
+        });
         app
     }
 
@@ -296,8 +317,13 @@ impl App {
                             }
                         }
                         Err(error) => {
-                            self.message = Some((format!("{name}: {error}"), true));
-                            ops::log_push(&self.log, format!("< {name} failed"));
+                            ops::log_push(&self.log, format!("< {name} failed: {error}"));
+                            // Notifications are a bonus nobody asked for, so a
+                            // server without them should not greet the user
+                            // with a red banner. The log line is enough.
+                            if name != "subscribe" {
+                                self.message = Some((format!("{name}: {error}"), true));
+                            }
                         }
                     }
 
@@ -315,8 +341,66 @@ impl App {
             }
         }
 
+        self.drain_notices();
         self.pump();
         self.autoload_repo_info();
+    }
+
+    /// Fold push notifications into the state. The server tells us something
+    /// moved; it does not tell us the new state, so each kind of notice turns
+    /// into the read that does.
+    fn drain_notices(&mut self) {
+        let notices: Vec<Notice> = std::mem::take(&mut *self.notices.lock());
+        if notices.is_empty() {
+            return;
+        }
+
+        let mut refresh_status = false;
+        let mut refresh_locks = false;
+
+        for notice in notices {
+            match notice {
+                Notice::Subscribed => {
+                    self.live = true;
+                    ops::log_push(&self.log, "[live] subscribed to server notifications");
+                }
+                Notice::BranchPushed {
+                    revision_number,
+                    user,
+                } => {
+                    ops::log_push(
+                        &self.log,
+                        format!("[live] revision {revision_number} pushed{}", by(&user)),
+                    );
+                    refresh_status = true;
+                }
+                Notice::BranchCreated => ops::log_push(&self.log, "[live] branch created"),
+                Notice::BranchDeleted => ops::log_push(&self.log, "[live] branch deleted"),
+                Notice::Locked { paths, user } => {
+                    ops::log_push(
+                        &self.log,
+                        format!("[live] locked {}{}", paths.join(", "), by(&user)),
+                    );
+                    refresh_locks = true;
+                }
+                Notice::Unlocked { paths, user } => {
+                    ops::log_push(
+                        &self.log,
+                        format!("[live] unlocked {}{}", paths.join(", "), by(&user)),
+                    );
+                    refresh_locks = true;
+                }
+            }
+        }
+
+        if refresh_status {
+            // Someone else pushed: the remote moved, the working copy did not,
+            // so this reads the branch state without walking the filesystem.
+            self.dispatch(Request::Status { scan: false });
+        }
+        if refresh_locks {
+            self.dispatch(Request::Locks);
+        }
     }
 
     /// Queue the listing for the configured server, if there is one.
