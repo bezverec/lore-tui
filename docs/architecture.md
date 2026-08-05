@@ -133,9 +133,10 @@ The natural next steps, in rough order of effort:
 - **Purging untracked files** — `file::reset` takes a `purge` flag that deletes files Lore
   never tracked. `D` leaves it off, since "undo my edits" should not delete files Lore never
   knew about; a separate, louder action could expose it.
-- **Diff between two revisions** — `file::diff` already takes a source and a target
-  revision; the diff view leaves both empty, which Lore reads as "current revision" and
-  "current filesystem state". Wiring the history view to it would give per-revision diffs.
+- **Diff between two arbitrary revisions** — `file::diff` takes a source and a target, and
+  the two callers so far pass either nothing (working copy against the current revision) or
+  a revision and its first parent. Letting the user pick both ends would need a way to mark
+  a revision in the history list.
 - **Clone from the browser** — `repository::clone` streams progress events that map onto the
   existing log pane; the open question is where the working copy lands and what the TUI does
   afterwards.

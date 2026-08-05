@@ -145,6 +145,8 @@ pub struct App {
     /// Whether the server is pushing changes to us.
     pub live: bool,
     pub diff: Vec<DiffLine>,
+    /// View the diff was opened from, to return to when it closes.
+    diff_return: View,
     pub diff_title: String,
     pub diff_scroll: usize,
     /// Lines the diff pane can show, written by the renderer each frame so
@@ -188,6 +190,7 @@ impl App {
             notices: Arc::new(Mutex::new(Vec::new())),
             live: false,
             diff: Vec::new(),
+            diff_return: View::Status,
             diff_title: String::new(),
             diff_scroll: 0,
             diff_viewport: 0,
@@ -283,18 +286,28 @@ impl App {
                 OpResult::History(Err(error)) => {
                     self.message = Some((format!("history: {error}"), true));
                 }
-                OpResult::Diff(Ok(entries)) => {
-                    if entries.iter().all(|entry| entry.patch.trim().is_empty()) {
+                OpResult::Diff {
+                    label,
+                    result: Ok(entries),
+                } => {
+                    if entries.is_empty()
+                        || entries.iter().all(|entry| entry.patch.trim().is_empty())
+                    {
                         // Lore answers with an empty patch for a file whose
                         // content did not change textually — a binary asset, or
                         // a pure rename.
                         self.message = Some(("nothing to show in a diff".into(), true));
                     } else {
-                        self.build_diff(&entries);
+                        self.build_diff(&entries, label);
+                        if self.view != View::Diff {
+                            self.diff_return = self.view;
+                        }
                         self.view = View::Diff;
                     }
                 }
-                OpResult::Diff(Err(error)) => {
+                OpResult::Diff {
+                    result: Err(error), ..
+                } => {
                     self.message = Some((format!("diff: {error}"), true));
                 }
                 OpResult::Locks(Ok(locks)) => {
@@ -495,7 +508,7 @@ impl App {
     }
 
     /// Flatten the patches into styled lines once, ready to scroll.
-    fn build_diff(&mut self, entries: &[DiffEntry]) {
+    fn build_diff(&mut self, entries: &[DiffEntry], label: Option<String>) {
         let mut lines = Vec::new();
 
         for entry in entries {
@@ -546,9 +559,10 @@ impl App {
             }
         }
 
-        self.diff_title = match entries {
-            [entry] => format!(" Diff · {} ", entry.path),
-            entries => format!(" Diff · {} files ", entries.len()),
+        self.diff_title = match (label, entries) {
+            (Some(label), _) => format!(" Diff · {label} "),
+            (None, [entry]) => format!(" Diff · {} ", entry.path),
+            (None, entries) => format!(" Diff · {} files ", entries.len()),
         };
         self.diff = lines;
         self.diff_scroll = 0;
@@ -878,14 +892,9 @@ impl App {
 
     fn handle_main_key(&mut self, key: KeyEvent) {
         // The diff is a detour rather than a place to live, so everything that
-        // means "I am done here" takes you back to the status list.
-        if self.view == View::Diff
-            && matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('d' | 'q')
-            )
-        {
-            self.view = View::Status;
+        // means "I am done here" returns to the list it was opened from.
+        if self.view == View::Diff && matches!(key.code, KeyCode::Esc | KeyCode::Char('d' | 'q')) {
+            self.view = self.diff_return;
             return;
         }
 
@@ -954,16 +963,37 @@ impl App {
 
             KeyCode::Char(' ') => self.toggle_mark(),
 
-            KeyCode::Char('d') => {
-                if self.view == View::Status {
-                    match self.targets(&ALL_SECTIONS) {
-                        Targets::Paths(paths) => self.dispatch(Request::Diff { paths }),
-                        Targets::Empty | Targets::Inapplicable => {
-                            self.message = Some(("no file selected".into(), true));
-                        }
+            KeyCode::Char('d') => match self.view {
+                View::Status => match self.targets(&ALL_SECTIONS) {
+                    Targets::Paths(paths) => self.dispatch(Request::Diff {
+                        paths,
+                        source: String::new(),
+                        target: String::new(),
+                        label: None,
+                    }),
+                    Targets::Empty | Targets::Inapplicable => {
+                        self.message = Some(("no file selected".into(), true));
                     }
-                }
-            }
+                },
+                // A revision is shown against its first parent: what this
+                // revision changed. A root revision has nothing to compare to.
+                View::History => match self.history.get(self.history_selected) {
+                    Some(entry) => match entry.parents.first() {
+                        Some(parent) => self.dispatch(Request::Diff {
+                            paths: Vec::new(),
+                            source: parent.clone(),
+                            target: entry.revision.clone(),
+                            label: Some(format!("revision {}", entry.number)),
+                        }),
+                        None => {
+                            self.message =
+                                Some(("the first revision has no parent to diff".into(), true));
+                        }
+                    },
+                    None => self.message = Some(("no revision selected".into(), true)),
+                },
+                _ => {}
+            },
 
             KeyCode::Char('s') => match self.targets(&[Section::Unstaged, Section::Unmerged]) {
                 Targets::Paths(paths) => self.dispatch(Request::Stage { paths, scan: false }),

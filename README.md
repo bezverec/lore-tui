@@ -42,9 +42,10 @@ Four views, switched with `tab` or `1` to `4`:
   repository description, default branch, creator and creation date. The repository the
   current working copy belongs to is marked `●`.
 
-`d` opens a scrollable unified diff of the marked files, or of the selected one — the working
-copy against the current revision. It is reached from the status view rather than the view
-cycle, and `d`, `esc` or `q` returns.
+`d` opens a scrollable unified diff. In the status view that is the marked files, or the
+selected one, as the working copy stands against the current revision; in the history view it
+is what the selected revision changed, against its first parent. The diff sits outside the
+view cycle, and `d`, `esc` or `q` returns to whichever list opened it.
 
 File locks — the answer to binary assets that cannot be merged — are shown as an `L` column in
 the status list, with the owner and time in the detail pane. `l` locks and `L` releases,
@@ -77,7 +78,7 @@ events of whatever is running.
 | `A` | abort the merge in progress |
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
 | `space` | mark the file for the next stage, unstage or diff |
-| `d` | diff the marked files, or the selected one; `d`, `esc` or `q` closes it |
+| `d` | diff: the marked files in status, the selected revision in history |
 | `l` / `L` | lock / unlock the marked files, or the selected one |
 | `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |
@@ -151,8 +152,9 @@ If the Lore server also runs in Docker, put the container on the same network (`
   in, not the ones in the browser.
 - **Archiving or deleting branches**, and `branch::merge_into` — merging the current branch
   into another one, rather than the other way round.
-- **Diffs between revisions.** `d` diffs the working copy against the current revision;
-  picking two arbitrary revisions is not wired up, though `file::diff` takes them.
+- **Diffs between two arbitrary revisions.** `d` covers the working copy and a revision
+  against its parent; picking any two revisions is not wired up, though `file::diff` takes
+  them. A merge revision is shown against its first parent only.
 - **Locking a file with no changes.** Locks are driven from the status list, which only holds
   files that differ from the current revision. Locking an untouched file needs the CLI.
 - **Telling your locks from everyone else's.** Both render the same; the owner is in the

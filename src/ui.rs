@@ -804,7 +804,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("j k ↑ ↓", "move selection"),
         ("g G", "jump to first / last"),
         ("space", "mark the file for the next stage or unstage"),
-        ("d", "diff the marked files, or the selected one"),
+        ("d", "diff: the marked files, or the selected revision"),
         ("l / L", "lock / unlock the marked files, or the selected one"),
         ("s", "stage the marked files, or the selected one"),
         ("S", "scan the working copy and stage everything"),

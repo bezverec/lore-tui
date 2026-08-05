@@ -190,7 +190,11 @@ pub struct RepoInfo {
 pub enum OpResult {
     Status(Result<StatusSnapshot, String>),
     History(Result<Vec<HistoryEntry>, String>),
-    Diff(Result<Vec<DiffEntry>, String>),
+    Diff {
+        /// What to call the diff in the pane title. `None` names the files.
+        label: Option<String>,
+        result: Result<Vec<DiffEntry>, String>,
+    },
     Locks(Result<Vec<LockEntry>, String>),
     Branches(Result<Vec<BranchEntry>, String>),
     RemoteUrl(Result<String, String>),
@@ -651,12 +655,15 @@ fn sync(globals: LoreGlobalArgs, sink: &LogSink) -> Result<String, String> {
 /// `DEFAULT_CONTEXT_LINES`, which is not re-exported through `lore::interface`.
 const DIFF_CONTEXT_LINES: u32 = 3;
 
-/// Diff the given paths. Both revisions are left empty, which Lore reads as
-/// "the current revision" and "the current filesystem state" — the working copy
-/// change, which is what the status list is showing.
+/// Diff the given paths between two revisions. Empty revisions mean "the
+/// current revision" and "the current filesystem state", which is the working
+/// copy change the status list shows; naming a revision and its parent instead
+/// gives what that revision changed. Empty paths cover everything that differs.
 fn diff(
     globals: LoreGlobalArgs,
     paths: Vec<String>,
+    source: String,
+    target: String,
     sink: &LogSink,
 ) -> Result<Vec<DiffEntry>, String> {
     let entries: Arc<Mutex<Vec<DiffEntry>>> = Arc::new(Mutex::new(Vec::new()));
@@ -675,8 +682,8 @@ fn diff(
 
     let args = LoreFileDiffArgs {
         paths: LoreArray::from_vec(paths.iter().map(LoreString::from).collect()),
-        source_revision: LoreString::from(""),
-        target_revision: LoreString::from(""),
+        source_revision: LoreString::from(&source),
+        target_revision: LoreString::from(&target),
         diff3: 0,
         context_lines: DIFF_CONTEXT_LINES,
         ignore_whitespace_eol: 0,
@@ -1171,7 +1178,12 @@ pub fn repository_url(remote: &str, name: &str) -> String {
 pub enum Request {
     Status { scan: bool },
     History,
-    Diff { paths: Vec<String> },
+    Diff {
+        paths: Vec<String>,
+        source: String,
+        target: String,
+        label: Option<String>,
+    },
     Locks,
     Lock { paths: Vec<String> },
     Unlock { paths: Vec<String> },
@@ -1243,7 +1255,15 @@ pub fn spawn(
         let result = match request {
             Request::Status { scan } => OpResult::Status(status(globals, scan, &sink)),
             Request::History => OpResult::History(history(globals, 0, &sink)),
-            Request::Diff { paths } => OpResult::Diff(diff(globals, paths, &sink)),
+            Request::Diff {
+                paths,
+                source,
+                target,
+                label,
+            } => OpResult::Diff {
+                result: diff(globals, paths, source, target, &sink),
+                label,
+            },
             Request::Locks => OpResult::Locks(locks(globals, &sink)),
             Request::Lock { paths } => OpResult::Action {
                 name,
