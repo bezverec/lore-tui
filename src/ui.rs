@@ -97,6 +97,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             draw_repos_list(frame, app, left);
             draw_repos_detail(frame, app, right);
         }
+        View::FileHistory => {
+            draw_file_history_list(frame, app, left);
+            draw_file_history_detail(frame, app, right);
+        }
         // A diff needs the width; it takes the whole body rather than a column.
         View::Diff => draw_diff(frame, app, body),
     }
@@ -659,6 +663,91 @@ fn draw_repos_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn draw_file_history_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .file_history
+        .iter()
+        .map(|entry| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:>5} ", entry.number),
+                    Style::new().fg(Color::Cyan),
+                ),
+                Span::styled(entry.action.to_string(), Style::new().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::raw(entry.subject().to_string()),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::bordered().title(format!(" History · {} ", app.file_history_path)),
+        )
+        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.file_history.is_empty() {
+        state.select(Some(app.file_history_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_file_history_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    match app.file_history.get(app.file_history_selected) {
+        Some(entry) => {
+            lines.push(Line::from(vec![
+                Span::styled("revision  ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    entry.number.to_string(),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if entry.merge { "  merge" } else { "" },
+                    Style::new().fg(Color::Magenta),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("signature ", Style::new().fg(Color::DarkGray)),
+                Span::raw(entry.revision.clone()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("size      ", Style::new().fg(Color::DarkGray)),
+                Span::raw(format_size(entry.size)),
+            ]));
+            if !entry.author.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("author    ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(entry.author.clone()),
+                ]));
+            }
+            if entry.timestamp > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("date      ", Style::new().fg(Color::DarkGray)),
+                    Span::raw(format_time(entry.timestamp)),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            for line in entry.message.lines() {
+                lines.push(Line::raw(line.to_string()));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "no revision selected",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Revision "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn draw_diff(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let viewport = area.height.saturating_sub(2) as usize;
     // Recorded for the scroll clamp, which cannot know the pane height.
@@ -805,6 +894,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("g G", "jump to first / last"),
         ("space", "mark the file for the next stage or unstage"),
         ("d", "diff: the marked files, or the selected revision"),
+        ("h", "revisions that touched the selected file"),
         ("l / L", "lock / unlock the marked files, or the selected one"),
         ("s", "stage the marked files, or the selected one"),
         ("S", "scan the working copy and stage everything"),

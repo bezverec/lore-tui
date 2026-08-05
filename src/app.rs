@@ -21,6 +21,7 @@ use crate::ops;
 use crate::ops::BranchEntry;
 use crate::ops::DiffEntry;
 use crate::ops::FileEntry;
+use crate::ops::FileHistoryEntry;
 use crate::ops::HistoryEntry;
 use crate::ops::LockEntry;
 use crate::ops::LogSink;
@@ -40,9 +41,11 @@ pub enum View {
     History,
     Branches,
     Repos,
-    /// Reached with `d` from the status view rather than the view cycle, since
-    /// it shows one specific diff rather than a standing list.
+    /// Reached with `d` rather than the view cycle, since it shows one specific
+    /// diff rather than a standing list.
     Diff,
+    /// Reached with `h` from the status view: the revisions of one file.
+    FileHistory,
 }
 
 /// How a diff line should read. Classified once when the diff lands, so
@@ -144,9 +147,13 @@ pub struct App {
     notices: NoticeSink,
     /// Whether the server is pushing changes to us.
     pub live: bool,
+    pub file_history: Vec<FileHistoryEntry>,
+    pub file_history_selected: usize,
+    pub file_history_path: String,
     pub diff: Vec<DiffLine>,
-    /// View the diff was opened from, to return to when it closes.
-    diff_return: View,
+    /// View a detour — the diff or a file's history — was opened from, to
+    /// return to when it closes.
+    detour_return: View,
     pub diff_title: String,
     pub diff_scroll: usize,
     /// Lines the diff pane can show, written by the renderer each frame so
@@ -189,8 +196,11 @@ impl App {
             branches_selected: 0,
             notices: Arc::new(Mutex::new(Vec::new())),
             live: false,
+            file_history: Vec::new(),
+            file_history_selected: 0,
+            file_history_path: String::new(),
             diff: Vec::new(),
-            diff_return: View::Status,
+            detour_return: View::Status,
             diff_title: String::new(),
             diff_scroll: 0,
             diff_viewport: 0,
@@ -299,10 +309,7 @@ impl App {
                         self.message = Some(("nothing to show in a diff".into(), true));
                     } else {
                         self.build_diff(&entries, label);
-                        if self.view != View::Diff {
-                            self.diff_return = self.view;
-                        }
-                        self.view = View::Diff;
+                        self.enter_detour(View::Diff);
                     }
                 }
                 OpResult::Diff {
@@ -318,6 +325,26 @@ impl App {
                 }
                 OpResult::Locks(Err(error)) => {
                     self.message = Some((format!("locks: {error}"), true));
+                }
+                OpResult::FileHistory {
+                    path,
+                    result: Ok(entries),
+                } => {
+                    if entries.is_empty() {
+                        self.message = Some((format!("{path} has no history yet"), true));
+                    } else {
+                        self.file_history = entries;
+                        self.file_history_selected = 0;
+                        self.file_history_path = path;
+                        self.enter_detour(View::FileHistory);
+                    }
+                }
+                OpResult::FileHistory {
+                    result: Err(error), ..
+                } => {
+                    // Lore's error already names the file — a file with no
+                    // revisions yet reads as "file not found".
+                    self.message = Some((format!("history: {error}"), true));
                 }
                 OpResult::Branches(Ok(branches)) => {
                     self.branches = branches;
@@ -568,6 +595,15 @@ impl App {
         self.diff_scroll = 0;
     }
 
+    /// Open a view that is a detour from a list, remembering where to go back
+    /// to. Re-entering from a detour keeps the original destination.
+    fn enter_detour(&mut self, view: View) {
+        if !matches!(self.view, View::Diff | View::FileHistory) {
+            self.detour_return = self.view;
+        }
+        self.view = view;
+    }
+
     /// Largest scroll offset that still fills the pane.
     fn diff_max_scroll(&self) -> usize {
         self.diff.len().saturating_sub(self.diff_viewport.max(1))
@@ -785,6 +821,14 @@ impl App {
                 let index = (self.branches_selected as isize + delta).clamp(0, last);
                 self.branches_selected = index as usize;
             }
+            View::FileHistory => {
+                if self.file_history.is_empty() {
+                    return;
+                }
+                let last = self.file_history.len() as isize - 1;
+                let index = (self.file_history_selected as isize + delta).clamp(0, last);
+                self.file_history_selected = index as usize;
+            }
             View::Diff => {
                 let last = self.diff_max_scroll() as isize;
                 let offset = (self.diff_scroll as isize + delta).clamp(0, last);
@@ -818,6 +862,13 @@ impl App {
                     0
                 } else {
                     self.branches.len().saturating_sub(1)
+                };
+            }
+            View::FileHistory => {
+                self.file_history_selected = if first {
+                    0
+                } else {
+                    self.file_history.len().saturating_sub(1)
                 };
             }
             View::Diff => {
@@ -891,10 +942,15 @@ impl App {
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) {
-        // The diff is a detour rather than a place to live, so everything that
-        // means "I am done here" returns to the list it was opened from.
-        if self.view == View::Diff && matches!(key.code, KeyCode::Esc | KeyCode::Char('d' | 'q')) {
-            self.view = self.diff_return;
+        // A detour is not a place to live, so everything that means "I am done
+        // here" returns to the list it was opened from.
+        let leave = match self.view {
+            View::Diff => matches!(key.code, KeyCode::Esc | KeyCode::Char('d' | 'q')),
+            View::FileHistory => matches!(key.code, KeyCode::Esc | KeyCode::Char('h' | 'q')),
+            _ => false,
+        };
+        if leave {
+            self.view = self.detour_return;
             return;
         }
 
@@ -916,8 +972,8 @@ impl App {
                     View::Status => View::History,
                     View::History => View::Branches,
                     View::Branches => View::Repos,
-                    // The diff is outside the cycle; tab leaves it.
-                    View::Repos | View::Diff => View::Status,
+                    // Detours are outside the cycle; tab leaves them.
+                    View::Repos | View::Diff | View::FileHistory => View::Status,
                 };
                 self.show(next);
             }
@@ -1030,6 +1086,20 @@ impl App {
                     value: String::new(),
                 }
             }
+            // One file's history, so this reads the selection rather than the
+            // marks the file actions use.
+            KeyCode::Char('h') => {
+                if self.view == View::Status {
+                    match self.selected_file() {
+                        Some((_, path)) => {
+                            let path = path.to_string();
+                            self.dispatch(Request::FileHistory { path });
+                        }
+                        None => self.message = Some(("no file selected".into(), true)),
+                    }
+                }
+            }
+
             KeyCode::Char('C') => {
                 // Prefilled with the message being replaced: an amend is
                 // usually a fix to it, not a rewrite from nothing.

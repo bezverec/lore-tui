@@ -69,7 +69,11 @@ scans, including on first load.
 **Revision metadata arrives as separate events.** `history` emits a `RevisionHistoryEntry`
 followed by `Metadata` events (`message`, `timestamp`, `committed-by`, …) that belong to the
 entry emitted just before them. They are folded into the most recent entry as they stream
-in — the same association the CLI makes.
+in — the same association the CLI makes. `file::history` streams the same way, with
+`FileHistory` in place of `RevisionHistoryEntry`.
+
+**A file with no revisions is an error, not an empty history.** `file::history` on something
+that exists only on disk answers "file not found", which is what the status message shows.
 
 **`LoreArray::from_vec(vec![])` is not the way to pass an empty array.** It allocates with a
 zero-size layout. Use `LoreArray::default()`.

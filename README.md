@@ -51,6 +51,11 @@ File locks — the answer to binary assets that cannot be merged — are shown a
 the status list, with the owner and time in the detail pane. `l` locks and `L` releases,
 across the marked files or the selected one.
 
+`h` lists the revisions that touched the selected file, with the action, the size at each
+revision and a marker for merges. Like the diff, it is a detour that returns where it came
+from — and it reads the selection rather than the marks, since one file's history is the only
+thing it can mean.
+
 `C` rewrites the message of the most recent revision, prefilled with the message it replaces.
 Note that this produces a new revision signature, so amending something already pushed leaves
 the local branch diverged from the remote. `D` throws away local changes, restoring the files
@@ -79,6 +84,7 @@ events of whatever is running.
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
 | `space` | mark the file for the next stage, unstage or diff |
 | `d` | diff: the marked files in status, the selected revision in history |
+| `h` | the revisions that touched the selected file |
 | `l` / `L` | lock / unlock the marked files, or the selected one |
 | `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |

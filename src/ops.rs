@@ -147,6 +147,25 @@ pub enum Notice {
 /// Where push notifications accumulate between frames.
 pub type NoticeSink = Arc<Mutex<Vec<Notice>>>;
 
+/// One revision in which a given file changed.
+#[derive(Clone, Debug, Default)]
+pub struct FileHistoryEntry {
+    pub number: u64,
+    pub revision: String,
+    pub action: char,
+    pub size: u64,
+    pub merge: bool,
+    pub message: String,
+    pub author: String,
+    pub timestamp: u64,
+}
+
+impl FileHistoryEntry {
+    pub fn subject(&self) -> &str {
+        self.message.lines().next().unwrap_or("")
+    }
+}
+
 /// A file lock held on the current branch.
 #[derive(Clone, Debug)]
 pub struct LockEntry {
@@ -196,6 +215,10 @@ pub enum OpResult {
         result: Result<Vec<DiffEntry>, String>,
     },
     Locks(Result<Vec<LockEntry>, String>),
+    FileHistory {
+        path: String,
+        result: Result<Vec<FileHistoryEntry>, String>,
+    },
     Branches(Result<Vec<BranchEntry>, String>),
     RemoteUrl(Result<String, String>),
     Repos(Result<Vec<RepoEntry>, String>),
@@ -420,6 +443,69 @@ fn history(globals: LoreGlobalArgs, length: u32, sink: &LogSink) -> Result<Vec<H
     };
 
     lore::runtime().block_on(lore::revision::history(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(String::new())?;
+
+    let entries = std::mem::take(&mut *entries.lock());
+    Ok(entries)
+}
+
+/// Revisions in which one file changed. Metadata events follow each entry and
+/// belong to it, the same association the revision log uses.
+fn file_history(
+    globals: LoreGlobalArgs,
+    path: String,
+    sink: &LogSink,
+) -> Result<Vec<FileHistoryEntry>, String> {
+    let entries: Arc<Mutex<Vec<FileHistoryEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let collector = entries.clone();
+    let cb = callback(sink, &outcome, move |event| match event {
+        LoreEvent::FileHistory(data) => {
+            collector.lock().push(FileHistoryEntry {
+                number: data.revision_number,
+                revision: data.revision.to_string(),
+                action: action_char(data.action),
+                size: data.size,
+                merge: !data.parent[1].is_zero(),
+                ..Default::default()
+            });
+        }
+        LoreEvent::Metadata(data) => {
+            let mut entries = collector.lock();
+            let Some(entry) = entries.last_mut() else {
+                return;
+            };
+            match (data.key.as_str(), &data.value) {
+                (META_MESSAGE, LoreMetadata::String(value)) => {
+                    entry.message = value.as_str().to_string();
+                }
+                (META_TIMESTAMP, LoreMetadata::Numeric(value)) => {
+                    entry.timestamp = *value;
+                }
+                (META_COMMITTED_BY, LoreMetadata::String(value)) => {
+                    entry.author = value.as_str().to_string();
+                }
+                (META_CREATED_BY, LoreMetadata::String(value)) if entry.author.is_empty() => {
+                    entry.author = value.as_str().to_string();
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    });
+
+    let args = LoreFileHistoryArgs {
+        path: LoreString::from(&path),
+        revision: LoreString::from(""),
+        branch: LoreString::from(""),
+        length: 0,
+        depth: 0,
+    };
+
+    lore::runtime().block_on(lore::file::history(globals, args, cb));
 
     let outcome = std::mem::take(&mut *outcome.lock());
     outcome.into_result(String::new())?;
@@ -1184,6 +1270,7 @@ pub enum Request {
         target: String,
         label: Option<String>,
     },
+    FileHistory { path: String },
     Locks,
     Lock { paths: Vec<String> },
     Unlock { paths: Vec<String> },
@@ -1212,6 +1299,7 @@ impl Request {
             Request::Status { .. } => "status",
             Request::History => "history",
             Request::Diff { .. } => "diff",
+            Request::FileHistory { .. } => "file history",
             Request::Locks => "locks",
             Request::Lock { .. } => "lock",
             Request::Unlock { .. } => "unlock",
@@ -1263,6 +1351,10 @@ pub fn spawn(
             } => OpResult::Diff {
                 result: diff(globals, paths, source, target, &sink),
                 label,
+            },
+            Request::FileHistory { path } => OpResult::FileHistory {
+                result: file_history(globals, path.clone(), &sink),
+                path,
             },
             Request::Locks => OpResult::Locks(locks(globals, &sink)),
             Request::Lock { paths } => OpResult::Action {
