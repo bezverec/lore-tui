@@ -147,6 +147,14 @@ pub enum Notice {
 /// Where push notifications accumulate between frames.
 pub type NoticeSink = Arc<Mutex<Vec<Notice>>>;
 
+/// One entry in a revision's file tree.
+#[derive(Clone, Debug)]
+pub struct TreeEntry {
+    pub name: String,
+    pub directory: bool,
+    pub size: u64,
+}
+
 /// One revision in which a given file changed.
 #[derive(Clone, Debug, Default)]
 pub struct FileHistoryEntry {
@@ -218,6 +226,10 @@ pub enum OpResult {
     FileHistory {
         path: String,
         result: Result<Vec<FileHistoryEntry>, String>,
+    },
+    Tree {
+        path: String,
+        result: Result<Vec<TreeEntry>, String>,
     },
     Branches(Result<Vec<BranchEntry>, String>),
     RemoteUrl(Result<String, String>),
@@ -448,6 +460,81 @@ fn history(globals: LoreGlobalArgs, length: u32, sink: &LogSink) -> Result<Vec<H
     outcome.into_result(String::new())?;
 
     let entries = std::mem::take(&mut *entries.lock());
+    Ok(entries)
+}
+
+/// List one directory of a revision's file tree.
+///
+/// This rides on `repository::dump`, which Lore documents as diagnostic. There
+/// is a principled alternative in `revision_tree::list_children`, but it works
+/// on an open store handle and a loaded tree handle whose lifetime the caller
+/// manages, which is a much larger integration than one call per directory.
+///
+/// The dump's node names are the contract here: a trailing `/` marks a
+/// directory, and names are relative to the node that was dumped. Depth is
+/// bounded so only one directory is read at a time — `max_depth` counts the
+/// entry node itself, so listing a subdirectory needs two levels and listing
+/// the root needs one.
+fn tree(
+    globals: LoreGlobalArgs,
+    revision: String,
+    path: String,
+    sink: &LogSink,
+) -> Result<Vec<TreeEntry>, String> {
+    let names: Arc<Mutex<Vec<(String, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let collector = names.clone();
+    let cb = callback(sink, &outcome, move |event| {
+        if let LoreEvent::RepositoryStateDumpNode(data) = event {
+            collector
+                .lock()
+                .push((data.name.as_str().to_string(), data.size));
+        }
+    });
+
+    let at_root = path.is_empty();
+    let args = LoreRepositoryDumpArgs {
+        revision: LoreString::from(&revision),
+        path: LoreString::from(&path),
+        max_depth: if at_root { 1 } else { 2 },
+    };
+
+    lore::runtime().block_on(lore::repository::dump(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(String::new())?;
+
+    let names = std::mem::take(&mut *names.lock());
+    let mut entries: Vec<TreeEntry> = names
+        .into_iter()
+        .filter_map(|(name, size)| {
+            let directory = name.ends_with('/');
+            let name = name.trim_end_matches('/');
+
+            // At the root every node is a child. Below it, the dump leads with
+            // the directory itself and prefixes its children with its name.
+            let name = if at_root {
+                name.to_string()
+            } else {
+                name.split_once('/')?.1.to_string()
+            };
+
+            (!name.is_empty()).then_some(TreeEntry {
+                name,
+                directory,
+                size,
+            })
+        })
+        .collect();
+
+    // Directories first, then by name — the order a file browser is read in.
+    entries.sort_by(|left, right| {
+        right
+            .directory
+            .cmp(&left.directory)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     Ok(entries)
 }
 
@@ -1271,6 +1358,7 @@ pub enum Request {
         label: Option<String>,
     },
     FileHistory { path: String },
+    Tree { revision: String, path: String },
     Locks,
     Lock { paths: Vec<String> },
     Unlock { paths: Vec<String> },
@@ -1300,6 +1388,7 @@ impl Request {
             Request::History => "history",
             Request::Diff { .. } => "diff",
             Request::FileHistory { .. } => "file history",
+            Request::Tree { .. } => "tree",
             Request::Locks => "locks",
             Request::Lock { .. } => "lock",
             Request::Unlock { .. } => "unlock",
@@ -1354,6 +1443,10 @@ pub fn spawn(
             },
             Request::FileHistory { path } => OpResult::FileHistory {
                 result: file_history(globals, path.clone(), &sink),
+                path,
+            },
+            Request::Tree { revision, path } => OpResult::Tree {
+                result: tree(globals, revision, path.clone(), &sink),
                 path,
             },
             Request::Locks => OpResult::Locks(locks(globals, &sink)),

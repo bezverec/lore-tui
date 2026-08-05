@@ -56,6 +56,10 @@ revision and a marker for merges. Like the diff, it is a detour that returns whe
 from — and it reads the selection rather than the marks, since one file's history is the only
 thing it can mean.
 
+`t` in the history view browses the files of the selected revision — the whole tree as it
+stood then, not just what changed. `enter` descends into a directory, `esc` steps back up one
+level and leaves the tree from the root.
+
 `C` rewrites the message of the most recent revision, prefilled with the message it replaces.
 Note that this produces a new revision signature, so amending something already pushed leaves
 the local branch diverged from the remote. `D` throws away local changes, restoring the files
@@ -85,6 +89,7 @@ events of whatever is running.
 | `space` | mark the file for the next stage, unstage or diff |
 | `d` | diff: the marked files in status, the selected revision in history |
 | `h` | the revisions that touched the selected file |
+| `t` | history: browse the files of the selected revision |
 | `l` / `L` | lock / unlock the marked files, or the selected one |
 | `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |

@@ -118,6 +118,20 @@ take afterwards, and the branch list has to be re-read either way.
 incoming revision overwrite modified files; the branch view leaves it off, so a switch that
 would lose work fails instead of succeeding quietly.
 
+**The tree browser rides on a diagnostic API, and that is a real caveat.**
+`repository::dump` is documented as being for diagnostics. Its node events are what the
+browser reads, so the output format is the contract: a trailing `/` marks a directory, and
+names are relative to the node that was dumped. `max_depth` counts the entry node itself, so
+listing a subdirectory asks for two levels and listing the root asks for one — that keeps it
+to one directory per call. Two things to know before relying on it:
+
+- The principled API is `revision_tree::list_children`, but it needs an open `LoreStore`, a
+  `Partition` and a tree handle whose lifetime spans calls — a layer below the convenience
+  functions everything else here uses.
+- `dump` calls `cache_fragments` over the whole state before walking, so the per-directory
+  bound applies to the walk, not to that. On a repository of the size Lore is built for, this
+  is the part that would hurt.
+
 **The remote URL comes from the repository config.** `repository::config_get("remote_url")`
 returns what the working copy was created against — no need to parse `.lore/config.toml`.
 
@@ -141,6 +155,9 @@ The natural next steps, in rough order of effort:
   the two callers so far pass either nothing (working copy against the current revision) or
   a revision and its first parent. Letting the user pick both ends would need a way to mark
   a revision in the history list.
+- **A tree browser that does not lean on the dump** — see the note below. Moving to
+  `revision_tree::list_children` means opening a store, loading a tree handle and managing
+  its lifetime across requests, which is a layer below everything else here.
 - **Clone from the browser** — `repository::clone` streams progress events that map onto the
   existing log pane; the open question is where the working copy lands and what the TUI does
   afterwards.

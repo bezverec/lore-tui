@@ -101,6 +101,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             draw_file_history_list(frame, app, left);
             draw_file_history_detail(frame, app, right);
         }
+        View::Tree => draw_tree(frame, app, body),
         // A diff needs the width; it takes the whole body rather than a column.
         View::Diff => draw_diff(frame, app, body),
     }
@@ -663,6 +664,64 @@ fn draw_repos_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn draw_tree(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .tree
+        .iter()
+        .map(|entry| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if entry.directory { "  d " } else { "  · " },
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    entry.name.clone(),
+                    if entry.directory {
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new()
+                    },
+                ),
+                Span::styled(
+                    if entry.directory {
+                        String::new()
+                    } else {
+                        format!("   {}", format_size(entry.size))
+                    },
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+
+    let items = if items.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  empty",
+            Style::new().fg(Color::DarkGray),
+        )))]
+    } else {
+        items
+    };
+
+    let where_ = if app.tree_path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", app.tree_path)
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::bordered().title(format!(" Tree · {} · {where_} ", app.tree_label)),
+        )
+        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+    let mut state = ListState::default();
+    if !app.tree.is_empty() {
+        state.select(Some(app.tree_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
 fn draw_file_history_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let items: Vec<ListItem<'_>> = app
         .file_history
@@ -895,6 +954,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("space", "mark the file for the next stage or unstage"),
         ("d", "diff: the marked files, or the selected revision"),
         ("h", "revisions that touched the selected file"),
+        ("t", "browse the files of the selected revision"),
         ("l / L", "lock / unlock the marked files, or the selected one"),
         ("s", "stage the marked files, or the selected one"),
         ("S", "scan the working copy and stage everything"),

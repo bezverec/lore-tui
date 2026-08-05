@@ -34,6 +34,7 @@ use crate::ops::Request;
 use crate::ops::Resolution;
 use crate::ops::Section;
 use crate::ops::StatusSnapshot;
+use crate::ops::TreeEntry;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -46,6 +47,8 @@ pub enum View {
     Diff,
     /// Reached with `h` from the status view: the revisions of one file.
     FileHistory,
+    /// Reached with `t` from the history view: the files of one revision.
+    Tree,
 }
 
 /// How a diff line should read. Classified once when the diff lands, so
@@ -147,6 +150,13 @@ pub struct App {
     notices: NoticeSink,
     /// Whether the server is pushing changes to us.
     pub live: bool,
+    pub tree: Vec<TreeEntry>,
+    pub tree_selected: usize,
+    /// Directory being listed, empty at the repository root.
+    pub tree_path: String,
+    /// Revision the tree belongs to, and how to name it.
+    tree_revision: String,
+    pub tree_label: String,
     pub file_history: Vec<FileHistoryEntry>,
     pub file_history_selected: usize,
     pub file_history_path: String,
@@ -196,6 +206,11 @@ impl App {
             branches_selected: 0,
             notices: Arc::new(Mutex::new(Vec::new())),
             live: false,
+            tree: Vec::new(),
+            tree_selected: 0,
+            tree_path: String::new(),
+            tree_revision: String::new(),
+            tree_label: String::new(),
             file_history: Vec::new(),
             file_history_selected: 0,
             file_history_path: String::new(),
@@ -338,6 +353,20 @@ impl App {
                         self.file_history_path = path;
                         self.enter_detour(View::FileHistory);
                     }
+                }
+                OpResult::Tree {
+                    path,
+                    result: Ok(entries),
+                } => {
+                    self.tree = entries;
+                    self.tree_selected = 0;
+                    self.tree_path = path;
+                    self.enter_detour(View::Tree);
+                }
+                OpResult::Tree {
+                    result: Err(error), ..
+                } => {
+                    self.message = Some((format!("tree: {error}"), true));
                 }
                 OpResult::FileHistory {
                     result: Err(error), ..
@@ -595,10 +624,24 @@ impl App {
         self.diff_scroll = 0;
     }
 
+    /// Repository-relative path of a child of the directory being listed.
+    fn tree_child_path(&self, name: &str) -> String {
+        if self.tree_path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{name}", self.tree_path)
+        }
+    }
+
+    fn load_tree(&mut self, path: String) {
+        let revision = self.tree_revision.clone();
+        self.dispatch(Request::Tree { revision, path });
+    }
+
     /// Open a view that is a detour from a list, remembering where to go back
     /// to. Re-entering from a detour keeps the original destination.
     fn enter_detour(&mut self, view: View) {
-        if !matches!(self.view, View::Diff | View::FileHistory) {
+        if !matches!(self.view, View::Diff | View::FileHistory | View::Tree) {
             self.detour_return = self.view;
         }
         self.view = view;
@@ -829,6 +872,14 @@ impl App {
                 let index = (self.file_history_selected as isize + delta).clamp(0, last);
                 self.file_history_selected = index as usize;
             }
+            View::Tree => {
+                if self.tree.is_empty() {
+                    return;
+                }
+                let last = self.tree.len() as isize - 1;
+                let index = (self.tree_selected as isize + delta).clamp(0, last);
+                self.tree_selected = index as usize;
+            }
             View::Diff => {
                 let last = self.diff_max_scroll() as isize;
                 let offset = (self.diff_scroll as isize + delta).clamp(0, last);
@@ -869,6 +920,13 @@ impl App {
                     0
                 } else {
                     self.file_history.len().saturating_sub(1)
+                };
+            }
+            View::Tree => {
+                self.tree_selected = if first {
+                    0
+                } else {
+                    self.tree.len().saturating_sub(1)
                 };
             }
             View::Diff => {
@@ -947,11 +1005,39 @@ impl App {
         let leave = match self.view {
             View::Diff => matches!(key.code, KeyCode::Esc | KeyCode::Char('d' | 'q')),
             View::FileHistory => matches!(key.code, KeyCode::Esc | KeyCode::Char('h' | 'q')),
+            // Escape steps out of a subdirectory before it leaves the tree.
+            View::Tree => {
+                matches!(key.code, KeyCode::Char('t' | 'q'))
+                    || (key.code == KeyCode::Esc && self.tree_path.is_empty())
+            }
             _ => false,
         };
         if leave {
             self.view = self.detour_return;
             return;
+        }
+
+        if self.view == View::Tree {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(entry) = self.tree.get(self.tree_selected)
+                        && entry.directory
+                    {
+                        let path = self.tree_child_path(&entry.name.clone());
+                        self.load_tree(path);
+                    }
+                    return;
+                }
+                KeyCode::Esc | KeyCode::Backspace => {
+                    let parent = match self.tree_path.rsplit_once('/') {
+                        Some((parent, _)) => parent.to_string(),
+                        None => String::new(),
+                    };
+                    self.load_tree(parent);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match key.code {
@@ -973,7 +1059,7 @@ impl App {
                     View::History => View::Branches,
                     View::Branches => View::Repos,
                     // Detours are outside the cycle; tab leaves them.
-                    View::Repos | View::Diff | View::FileHistory => View::Status,
+                    View::Repos | View::Diff | View::FileHistory | View::Tree => View::Status,
                 };
                 self.show(next);
             }
@@ -1086,6 +1172,17 @@ impl App {
                     value: String::new(),
                 }
             }
+            KeyCode::Char('t') if self.view == View::History => {
+                match self.history.get(self.history_selected) {
+                    Some(entry) => {
+                        self.tree_revision = entry.revision.clone();
+                        self.tree_label = format!("revision {}", entry.number);
+                        self.load_tree(String::new());
+                    }
+                    None => self.message = Some(("no revision selected".into(), true)),
+                }
+            }
+
             // One file's history, so this reads the selection rather than the
             // marks the file actions use.
             KeyCode::Char('h') => {
