@@ -30,6 +30,7 @@ use crate::ops::OpResult;
 use crate::ops::RepoEntry;
 use crate::ops::RepoInfo;
 use crate::ops::Request;
+use crate::ops::Resolution;
 use crate::ops::Section;
 use crate::ops::StatusSnapshot;
 
@@ -93,17 +94,20 @@ enum Targets {
 }
 
 /// What a text prompt is collecting.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum InputKind {
     CommitMessage,
     BranchName,
+    /// Message for the commit a clean merge makes on its own.
+    MergeMessage { branch: String },
 }
 
 impl InputKind {
-    pub fn title(self) -> &'static str {
+    pub fn title(&self) -> &'static str {
         match self {
             InputKind::CommitMessage => " Commit message ",
             InputKind::BranchName => " New branch name ",
+            InputKind::MergeMessage { .. } => " Merge message ",
         }
     }
 }
@@ -369,7 +373,10 @@ impl App {
                     if matches!(name, "lock" | "unlock") {
                         self.dispatch(Request::Locks);
                     }
-                    if matches!(name, "switch branch" | "create branch") {
+                    if matches!(
+                        name,
+                        "switch branch" | "create branch" | "merge" | "abort merge"
+                    ) {
                         self.dispatch(Request::Branches);
                     }
                 }
@@ -557,6 +564,22 @@ impl App {
         self.branches.get(self.branches_selected)
     }
 
+    /// Settle conflicted files. `verb` is only for the message when there is
+    /// nothing to settle.
+    fn resolve(&mut self, how: Resolution, verb: &str) {
+        if self.view != View::Status {
+            return;
+        }
+
+        match self.targets(&[Section::Unmerged]) {
+            Targets::Paths(paths) => self.dispatch(Request::Resolve { paths, how }),
+            Targets::Empty => self.message = Some(("no file selected".into(), true)),
+            Targets::Inapplicable => {
+                self.message = Some((format!("nothing to be {verb} — no conflict here"), true));
+            }
+        }
+    }
+
     /// Switch views, loading the repository list the first time the browser is
     /// opened after the remote became known.
     fn show(&mut self, view: View) {
@@ -599,9 +622,31 @@ impl App {
         if self.status_selected >= self.rows.len() {
             self.status_selected = self.rows.len().saturating_sub(1);
         }
-        // A header may have landed under the cursor after the rebuild.
-        if matches!(self.rows.get(self.status_selected), Some(Row::Header(..))) {
-            self.move_selection(1);
+        // A header may have landed under the cursor after the rebuild. This
+        // steps over it directly rather than through `move_selection`, which
+        // acts on whichever view is showing — and a status refresh can land
+        // while the user is looking at another one.
+        self.step_status_selection(1);
+    }
+
+    /// Move the status selection by `delta` until it rests on a file row.
+    /// Stays put when there is no file row in that direction.
+    fn step_status_selection(&mut self, delta: isize) {
+        if !matches!(self.rows.get(self.status_selected), Some(Row::Header(..))) {
+            return;
+        }
+
+        let mut index = self.status_selected as isize;
+        let last = self.rows.len() as isize - 1;
+        loop {
+            index += delta;
+            if index < 0 || index > last {
+                return;
+            }
+            if matches!(self.rows[index as usize], Row::File(..)) {
+                self.status_selected = index as usize;
+                return;
+            }
         }
     }
 
@@ -735,9 +780,7 @@ impl App {
         match self.view {
             View::Status => {
                 self.status_selected = if first { 0 } else { self.rows.len().saturating_sub(1) };
-                if matches!(self.rows.get(self.status_selected), Some(Row::Header(..))) {
-                    self.move_selection(if first { 1 } else { -1 });
-                }
+                self.step_status_selection(if first { 1 } else { -1 });
             }
             View::History => {
                 self.history_selected = if first {
@@ -776,7 +819,7 @@ impl App {
             Modal::Input { kind, value } => match key.code {
                 KeyCode::Esc => self.modal = Modal::None,
                 KeyCode::Enter => {
-                    let kind = *kind;
+                    let kind = kind.clone();
                     let value = value.trim().to_string();
                     self.modal = Modal::None;
                     match (kind, value.is_empty()) {
@@ -791,6 +834,15 @@ impl App {
                         }
                         (InputKind::BranchName, false) => {
                             self.dispatch(Request::CreateBranch { name: value });
+                        }
+                        (InputKind::MergeMessage { .. }, true) => {
+                            self.message = Some(("merge needs a message".into(), true));
+                        }
+                        (InputKind::MergeMessage { branch }, false) => {
+                            self.dispatch(Request::MergeStart {
+                                branch,
+                                message: value,
+                            });
                         }
                     }
                 }
@@ -939,6 +991,40 @@ impl App {
                     value: String::new(),
                 }
             }
+            KeyCode::Char('m') => {
+                if self.view == View::Branches {
+                    match self.selected_branch() {
+                        Some(branch) if branch.current => {
+                            self.message = Some(("cannot merge a branch into itself".into(), true));
+                        }
+                        Some(branch) => {
+                            let branch = branch.name.clone();
+                            self.modal = Modal::Input {
+                                value: format!("Merge branch {branch}"),
+                                kind: InputKind::MergeMessage { branch },
+                            };
+                        }
+                        None => self.message = Some(("no branch selected".into(), true)),
+                    }
+                }
+            }
+
+            // Resolutions apply to the unmerged section only; the other
+            // sections have nothing to settle.
+            KeyCode::Char('o') => self.resolve(Resolution::Mine, "kept"),
+            KeyCode::Char('t') => self.resolve(Resolution::Theirs, "took"),
+            KeyCode::Char('x') => self.resolve(Resolution::AsIs, "resolved"),
+            KeyCode::Char('A') => {
+                if self.status.as_ref().is_some_and(|status| status.merging) {
+                    self.modal = Modal::Confirm {
+                        request: Some(Request::MergeAbort),
+                        prompt: "Abort the merge and drop what it staged?".into(),
+                    };
+                } else {
+                    self.message = Some(("no merge in progress".into(), true));
+                }
+            }
+
             KeyCode::Char('n') => {
                 if self.view == View::Branches {
                     self.modal = Modal::Input {

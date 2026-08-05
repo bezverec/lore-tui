@@ -75,6 +75,8 @@ pub struct StatusSnapshot {
     pub staged: Vec<FileEntry>,
     pub unmerged: Vec<FileEntry>,
     pub unstaged: Vec<FileEntry>,
+    /// A merge is staged and waiting to be committed or aborted.
+    pub merging: bool,
 }
 
 impl StatusSnapshot {
@@ -300,6 +302,11 @@ fn status(globals: LoreGlobalArgs, scan: bool, sink: &LogSink) -> Result<StatusS
             snapshot.remote_branch_exist = data.remote_branch_exist != 0;
             snapshot.local_ahead = data.is_local_ahead > 0;
             snapshot.remote_ahead = data.is_remote_ahead > 0;
+            // A staged revision that is not the current one, with an incoming
+            // revision recorded, is a merge waiting to be finished.
+            snapshot.merging = !data.revision_staged.is_zero()
+                && data.revision_staged != data.revision
+                && !data.revision_merged.is_zero();
         }
         LoreEvent::RepositoryStatusFile(data) => {
             // The event data types are not re-exported from `lore::interface`,
@@ -787,6 +794,136 @@ fn branches(globals: LoreGlobalArgs, sink: &LogSink) -> Result<Vec<BranchEntry>,
     Ok(entries)
 }
 
+/// Merge `branch` into the current one. Lore commits the merge itself when
+/// nothing conflicts; when something does, the conflicted files land in the
+/// status view's unmerged section and wait to be resolved.
+fn merge_start(
+    globals: LoreGlobalArgs,
+    branch: String,
+    message: String,
+    sink: &LogSink,
+) -> Result<String, String> {
+    let conflicts = Arc::new(Mutex::new(0u64));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let counter = conflicts.clone();
+    let sink_clone = sink.clone();
+    let cb = callback(sink, &outcome, move |event| {
+        if let LoreEvent::BranchMergeConflictFile(data) = event {
+            *counter.lock() += 1;
+            log_push(&sink_clone, format!("conflict {}", data.path.as_str()));
+        }
+    });
+
+    let args = LoreBranchMergeStartArgs {
+        branch: LoreString::from(&branch),
+        message: LoreString::from(&message),
+        no_commit: 0,
+        link: LoreString::from(""),
+        ignore_links: 0,
+    };
+
+    lore::runtime().block_on(lore::branch::merge_start(globals, args, cb));
+
+    let conflicts = *conflicts.lock();
+    let outcome = std::mem::take(&mut *outcome.lock());
+    let summary = if conflicts > 0 {
+        format!("merged {branch}, {conflicts} file(s) conflict")
+    } else {
+        format!("merged {branch}")
+    };
+
+    outcome.into_result(summary)
+}
+
+/// How a conflicted file is being settled.
+#[derive(Clone, Copy)]
+pub enum Resolution {
+    /// Keep the local side.
+    Mine,
+    /// Take the incoming side.
+    Theirs,
+    /// Accept the file as it stands on disk, after a manual edit.
+    AsIs,
+}
+
+impl Resolution {
+    fn verb(self) -> &'static str {
+        match self {
+            Resolution::Mine => "kept",
+            Resolution::Theirs => "took",
+            Resolution::AsIs => "resolved",
+        }
+    }
+}
+
+fn resolve(
+    globals: LoreGlobalArgs,
+    paths: Vec<String>,
+    how: Resolution,
+    sink: &LogSink,
+) -> Result<String, String> {
+    let resolved = Arc::new(Mutex::new(0u64));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let counter = resolved.clone();
+    let sink_clone = sink.clone();
+    // Two different events, because the three resolutions take two different
+    // routes: keeping one side stages that side's content and reports
+    // `FileStageFile`, while accepting the file as it stands only flags the
+    // node and reports `BranchMergeResolveFile`.
+    let cb = callback(sink, &outcome, move |event| {
+        let path = match event {
+            LoreEvent::BranchMergeResolveFile(data) => data.path.as_str(),
+            LoreEvent::FileStageFile(data) => data.path.as_str(),
+            _ => return,
+        };
+
+        *counter.lock() += 1;
+        log_push(&sink_clone, format!("{} {path}", how.verb()));
+    });
+
+    let paths = LoreArray::from_vec(paths.iter().map(LoreString::from).collect());
+
+    // The return code is redundant: `Complete` already recorded the outcome.
+    match how {
+        Resolution::Mine => lore::runtime().block_on(lore::branch::merge_resolve_mine(
+            globals,
+            LoreBranchMergeResolveMineArgs { paths },
+            cb,
+        )),
+        Resolution::Theirs => lore::runtime().block_on(lore::branch::merge_resolve_theirs(
+            globals,
+            LoreBranchMergeResolveTheirsArgs { paths },
+            cb,
+        )),
+        Resolution::AsIs => lore::runtime().block_on(lore::branch::merge_resolve(
+            globals,
+            LoreBranchMergeResolveArgs { paths },
+            cb,
+        )),
+    };
+
+    let count = *resolved.lock();
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result(format!("{} {count} file(s)", how.verb()))
+}
+
+fn merge_abort(globals: LoreGlobalArgs, sink: &LogSink) -> Result<String, String> {
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+    let cb = callback(sink, &outcome, |_| {});
+
+    let args = LoreBranchMergeAbortArgs {
+        link: LoreString::from(""),
+        ignore_links: 0,
+    };
+
+    lore::runtime().block_on(lore::branch::merge_abort(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result("merge aborted".to_string())
+}
+
 fn switch_branch(
     globals: LoreGlobalArgs,
     name: String,
@@ -989,6 +1126,9 @@ pub enum Request {
     Branches,
     SwitchBranch { name: String },
     CreateBranch { name: String },
+    MergeStart { branch: String, message: String },
+    Resolve { paths: Vec<String>, how: Resolution },
+    MergeAbort,
     RemoteUrl,
     Repos { url: String },
     RepoInfo { url: String, name: String },
@@ -1012,6 +1152,9 @@ impl Request {
             Request::Branches => "branches",
             Request::SwitchBranch { .. } => "switch branch",
             Request::CreateBranch { .. } => "create branch",
+            Request::MergeStart { .. } => "merge",
+            Request::Resolve { .. } => "resolve",
+            Request::MergeAbort => "abort merge",
             Request::RemoteUrl => "remote",
             Request::Repos { .. } => "repositories",
             Request::RepoInfo { .. } => "repository info",
@@ -1070,6 +1213,22 @@ pub fn spawn(
                 name,
                 result: create_branch(globals, branch, &sink),
                 reload_history: false,
+            },
+            Request::MergeStart { branch, message } => OpResult::Action {
+                name,
+                result: merge_start(globals, branch, message, &sink),
+                // A clean merge commits itself, so the log has moved.
+                reload_history: true,
+            },
+            Request::Resolve { paths, how } => OpResult::Action {
+                name,
+                result: resolve(globals, paths, how, &sink),
+                reload_history: false,
+            },
+            Request::MergeAbort => OpResult::Action {
+                name,
+                result: merge_abort(globals, &sink),
+                reload_history: true,
             },
             Request::RemoteUrl => OpResult::RemoteUrl(remote_url(globals, &sink)),
             Request::Repos { url } => OpResult::Repos(repos(globals, url, &sink)),

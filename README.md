@@ -35,8 +35,9 @@ Four views, switched with `tab` or `1` to `4`:
 - **Status** — staged, unmerged and unstaged changes, with the file detail beside the list.
 - **History** — the revision log, with message, author, date and parents per revision.
 - **Branches** — local and remote branches with their category, creator and latest revision.
-  `enter` switches the working copy to the selected branch, `n` creates one. Creating also
-  switches, which is Lore's behaviour rather than a shortcut taken here.
+  `enter` switches the working copy to the selected branch, `n` creates one and `m` merges
+  one into the current branch. Creating also switches, which is Lore's behaviour rather than
+  a shortcut taken here.
 - **Repositories** — what lives on the server this working copy points at, with per
   repository description, default branch, creator and creation date. The repository the
   current working copy belongs to is marked `●`.
@@ -48,6 +49,11 @@ cycle, and `d`, `esc` or `q` returns.
 File locks — the answer to binary assets that cannot be merged — are shown as an `L` column in
 the status list, with the owner and time in the detail pane. `l` locks and `L` releases,
 across the marked files or the selected one.
+
+Merging runs from the branch view. A clean merge commits itself; a conflicted one leaves the
+files in the status view's `Unmerged` section, marks the header `merge in progress`, and waits
+for `o`, `t` or `x` per file — or `A` to abandon the whole thing. An ordinary commit finishes
+it.
 
 The TUI subscribes to server push notifications, marked by a `●` in the header. When someone
 else pushes or locks a file, the header and the lock column follow along on their own — no
@@ -61,7 +67,9 @@ events of whatever is running.
 | Key | Action |
 | --- | --- |
 | `tab`, `1`–`4` | switch between status, history, branches and repositories |
-| `enter` / `n` | branches: switch to the selected branch / create one |
+| `enter` / `n` / `m` | branches: switch to / create / merge the selected branch |
+| `o` / `t` / `x` | conflict: keep mine / take theirs / accept the file as it is |
+| `A` | abort the merge in progress |
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
 | `space` | mark the file for the next stage, unstage or diff |
 | `d` | diff the marked files, or the selected one; `d`, `esc` or `q` closes it |
@@ -135,9 +143,8 @@ If the Lore server also runs in Docker, put the container on the same network (`
 - **Branches of other repositories.** Lore's `branch::list` has no URL parameter — it only
   reads the local working copy — so the branch view covers the repository you are standing
   in, not the ones in the browser.
-- **Merging, archiving or deleting branches.** The branch view lists, switches and creates.
-  Lore's merge workflow (`branch::merge_start`, `merge_into`, `merge_resolve`) is not wired
-  up, though the status view already has an `Unmerged` section for when it is.
+- **Archiving or deleting branches**, and `branch::merge_into` — merging the current branch
+  into another one, rather than the other way round.
 - **Diffs between revisions.** `d` diffs the working copy against the current revision;
   picking two arbitrary revisions is not wired up, though `file::diff` takes them.
 - **Locking a file with no changes.** Locks are driven from the status list, which only holds

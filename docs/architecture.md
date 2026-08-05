@@ -98,6 +98,15 @@ Notifications say that something moved, not what it moved to, so each kind turns
 read that answers it: a push refreshes the status without a filesystem scan (the remote moved,
 the working copy did not), a lock or unlock refreshes the lock list.
 
+**The three merge resolutions take two different routes, and report two different events.**
+Keeping one side (`merge_resolve_mine` / `_theirs`) stages that side's content and reports
+`FileStageFile`; accepting the file as it stands (`merge_resolve`) only flags the node and
+reports `BranchMergeResolveFile`. Counting one of them alone reports zero for the other.
+
+**A merge in progress is not a flag on the status event.** It is inferred the way the CLI
+infers it: a staged revision that differs from the current one, with an incoming revision
+recorded.
+
 **`branch::create` switches to the branch it creates.** There is no separate switch step to
 take afterwards, and the branch list has to be re-read either way.
 
@@ -124,9 +133,6 @@ The natural next steps, in rough order of effort:
 - **Diff between two revisions** — `file::diff` already takes a source and a target
   revision; the diff view leaves both empty, which Lore reads as "current revision" and
   "current filesystem state". Wiring the history view to it would give per-revision diffs.
-- **Merge workflow** — `branch::merge_start`, `merge_into`, `merge_resolve`,
-  `merge_resolve_mine` / `_theirs` and `merge_abort`. The status view already separates an
-  `Unmerged` section and reads `flag_conflict_unresolved`, so the display side has a start.
 - **Clone from the browser** — `repository::clone` streams progress events that map onto the
   existing log pane; the open question is where the working copy lands and what the TUI does
   afterwards.

@@ -151,10 +151,18 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     String::new()
                 }),
             ]));
-            lines.push(Line::from(vec![
+            let mut third = vec![
                 Span::styled("signature ", Style::new().fg(Color::DarkGray)),
                 Span::styled(status.revision.clone(), Style::new().fg(Color::DarkGray)),
-            ]));
+            ];
+            if status.merging {
+                third.push(Span::raw("  "));
+                third.push(Span::styled(
+                    "merge in progress",
+                    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(third));
         }
         None => lines.push(Line::from(Span::styled(
             "loading…",
@@ -804,7 +812,9 @@ fn draw_help(frame: &mut Frame<'_>) {
         ("c", "commit the staged revision"),
         ("p", "push to the remote"),
         ("y", "sync to the branch tip"),
-        ("enter / n", "branches: switch to / create a branch"),
+        ("enter / n / m", "branches: switch to / create / merge a branch"),
+        ("o / t / x", "conflict: keep mine / take theirs / accept as is"),
+        ("A", "abort the merge in progress"),
         ("r / R", "refresh the current list / the history"),
         ("esc", "clear the marks, or dismiss the status message"),
         ("q / ctrl-c", "quit"),
