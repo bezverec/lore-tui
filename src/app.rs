@@ -100,6 +100,8 @@ pub enum InputKind {
     BranchName,
     /// Message for the commit a clean merge makes on its own.
     MergeMessage { branch: String },
+    /// Replacement message for the most recent revision.
+    AmendMessage,
 }
 
 impl InputKind {
@@ -108,6 +110,7 @@ impl InputKind {
             InputKind::CommitMessage => " Commit message ",
             InputKind::BranchName => " New branch name ",
             InputKind::MergeMessage { .. } => " Merge message ",
+            InputKind::AmendMessage => " Amend the last commit message ",
         }
     }
 }
@@ -844,6 +847,12 @@ impl App {
                                 message: value,
                             });
                         }
+                        (InputKind::AmendMessage, true) => {
+                            self.message = Some(("a commit needs a message".into(), true));
+                        }
+                        (InputKind::AmendMessage, false) => {
+                            self.dispatch(Request::Amend { message: value });
+                        }
                     }
                 }
                 KeyCode::Backspace => {
@@ -991,6 +1000,39 @@ impl App {
                     value: String::new(),
                 }
             }
+            KeyCode::Char('C') => {
+                // Prefilled with the message being replaced: an amend is
+                // usually a fix to it, not a rewrite from nothing.
+                let current = self
+                    .history
+                    .first()
+                    .map(|entry| entry.message.clone())
+                    .unwrap_or_default();
+                self.modal = Modal::Input {
+                    kind: InputKind::AmendMessage,
+                    value: current,
+                };
+            }
+            KeyCode::Char('D') => {
+                if self.view == View::Status {
+                    match self.targets(&ALL_SECTIONS) {
+                        Targets::Paths(paths) => {
+                            let what = match paths.as_slice() {
+                                [path] => path.clone(),
+                                paths => format!("{} files", paths.len()),
+                            };
+                            self.modal = Modal::Confirm {
+                                request: Some(Request::Reset { paths }),
+                                prompt: format!("Throw away local changes to {what}?"),
+                            };
+                        }
+                        Targets::Empty | Targets::Inapplicable => {
+                            self.message = Some(("no file selected".into(), true));
+                        }
+                    }
+                }
+            }
+
             KeyCode::Char('m') => {
                 if self.view == View::Branches {
                     match self.selected_branch() {

@@ -513,6 +513,59 @@ fn commit(globals: LoreGlobalArgs, message: String, sink: &LogSink) -> Result<St
     outcome.into_result(summary)
 }
 
+/// Replace the message of the most recent revision.
+fn amend(globals: LoreGlobalArgs, message: String, sink: &LogSink) -> Result<String, String> {
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+    let cb = callback(sink, &outcome, |_| {});
+
+    let args = LoreRevisionAmendArgs {
+        message: LoreString::from(&message),
+    };
+
+    lore::runtime().block_on(lore::revision::amend(globals, args, cb));
+
+    let outcome = std::mem::take(&mut *outcome.lock());
+    outcome.into_result("amended the commit message".to_string())
+}
+
+/// Throw away local changes to the given paths, restoring them from the current
+/// revision. Untracked files are left alone: `purge` would delete files Lore
+/// never knew about, which is not what "undo my edits" should mean.
+fn reset(globals: LoreGlobalArgs, paths: Vec<String>, sink: &LogSink) -> Result<String, String> {
+    let counts = Arc::new(Mutex::new((0u64, 0u64)));
+    let outcome = Arc::new(Mutex::new(Outcome::default()));
+
+    let collector = counts.clone();
+    let sink_clone = sink.clone();
+    let cb = callback(sink, &outcome, move |event| match event {
+        LoreEvent::FileResetFile(data) => {
+            log_push(&sink_clone, format!("reset {}", data.path.as_str()));
+        }
+        LoreEvent::FileResetEnd(data) => {
+            *collector.lock() = (data.count.file_reset_count, data.count.file_delete_count);
+        }
+        _ => {}
+    });
+
+    let args = LoreFileResetArgs {
+        paths: LoreArray::from_vec(paths.iter().map(LoreString::from).collect()),
+        revision: LoreString::from(""),
+        purge: 0,
+    };
+
+    lore::runtime().block_on(lore::file::reset(globals, args, cb));
+
+    let (restored, deleted) = *counts.lock();
+    let outcome = std::mem::take(&mut *outcome.lock());
+    let summary = if deleted > 0 {
+        format!("reset {restored} file(s), removed {deleted}")
+    } else {
+        format!("reset {restored} file(s)")
+    };
+
+    outcome.into_result(summary)
+}
+
 fn push(globals: LoreGlobalArgs, sink: &LogSink) -> Result<String, String> {
     let pushed = Arc::new(Mutex::new(None));
     let outcome = Arc::new(Mutex::new(Outcome::default()));
@@ -1135,6 +1188,8 @@ pub enum Request {
     Stage { paths: Vec<String>, scan: bool },
     Unstage { paths: Vec<String> },
     Commit { message: String },
+    Amend { message: String },
+    Reset { paths: Vec<String> },
     Push,
     Sync,
 }
@@ -1161,6 +1216,8 @@ impl Request {
             Request::Stage { .. } => "stage",
             Request::Unstage { .. } => "unstage",
             Request::Commit { .. } => "commit",
+            Request::Amend { .. } => "amend",
+            Request::Reset { .. } => "reset",
             Request::Push => "push",
             Request::Sync => "sync",
         }
@@ -1250,6 +1307,16 @@ pub fn spawn(
                 name,
                 result: commit(globals, message, &sink),
                 reload_history: true,
+            },
+            Request::Amend { message } => OpResult::Action {
+                name,
+                result: amend(globals, message, &sink),
+                reload_history: true,
+            },
+            Request::Reset { paths } => OpResult::Action {
+                name,
+                result: reset(globals, paths, &sink),
+                reload_history: false,
             },
             Request::Push => OpResult::Action {
                 name,

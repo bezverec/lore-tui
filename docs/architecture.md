@@ -130,6 +130,9 @@ cache and reloads.
 
 The natural next steps, in rough order of effort:
 
+- **Purging untracked files** — `file::reset` takes a `purge` flag that deletes files Lore
+  never tracked. `D` leaves it off, since "undo my edits" should not delete files Lore never
+  knew about; a separate, louder action could expose it.
 - **Diff between two revisions** — `file::diff` already takes a source and a target
   revision; the diff view leaves both empty, which Lore reads as "current revision" and
   "current filesystem state". Wiring the history view to it would give per-revision diffs.

@@ -50,6 +50,11 @@ File locks — the answer to binary assets that cannot be merged — are shown a
 the status list, with the owner and time in the detail pane. `l` locks and `L` releases,
 across the marked files or the selected one.
 
+`C` rewrites the message of the most recent revision, prefilled with the message it replaces.
+Note that this produces a new revision signature, so amending something already pushed leaves
+the local branch diverged from the remote. `D` throws away local changes, restoring the files
+from the current revision; untracked files are left alone.
+
 Merging runs from the branch view. A clean merge commits itself; a conflicted one leaves the
 files in the status view's `Unmerged` section, marks the header `merge in progress`, and waits
 for `o`, `t` or `x` per file — or `A` to abandon the whole thing. An ordinary commit finishes
@@ -77,7 +82,8 @@ events of whatever is running.
 | `s` | stage the marked files, or the selected one when nothing is marked |
 | `S` | scan the working copy and stage everything |
 | `u` | unstage the marked files, or the selected one when nothing is marked |
-| `c` | commit the staged revision (opens a message prompt) |
+| `c` / `C` | commit the staged revision / amend the last commit message |
+| `D` | throw away local changes to the marked files, or the selected one |
 | `p` | push to the remote |
 | `y` | sync to the branch tip |
 | `r` | refresh the status, or the repository list in the browser |
