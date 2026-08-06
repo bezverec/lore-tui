@@ -144,6 +144,18 @@ selection settles — the queue does the throttling. Results are cached by name,
 included, so a repository that cannot be read is not retried on every frame; `r` clears the
 cache and reloads.
 
+## Testing
+
+The parts that are pure state are unit tested: `App::targets` and the mark handling,
+`step_status_selection`, `tree_entries`, `classify_diff_line`, `FileEntry::target`,
+`StatusSnapshot::remote_state`. `App::bare` builds the state without asking Lore for
+anything, which is what makes the `App` methods reachable from a test.
+
+Everything else needs a server, and is checked by driving the real binary: the TUI runs under
+tmux in a container, `tmux send-keys` feeds it keystrokes and `tmux capture-pane -p` reads the
+rendered screen back as text. That is how each feature here was verified, and it is worth
+keeping — a terminal UI can compile, pass every unit test, and still draw the wrong thing.
+
 ## Extending it
 
 The natural next steps, in rough order of effort:

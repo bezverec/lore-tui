@@ -138,6 +138,20 @@ The `lore` dependency is pinned to a specific revision. Lore is versioned `0.8.7
 is not published to crates.io, and makes no API stability promise, so an unpinned dependency
 would break without warning.
 
+## Tests
+
+```bash
+cargo test
+```
+
+The tests cover what can be checked without a server: how marks and the selection resolve into
+the paths an action runs on, how the section headers are stepped over, how a dumped tree
+becomes one directory's listing, and how a patch line is classified. They exist because each
+of those is somewhere a bug already happened once.
+
+Anything that talks to Lore is exercised by hand instead — see the note at the end of
+[docs/architecture.md](docs/architecture.md).
+
 ## Docker
 
 Building in a container avoids installing the Rust toolchain and `protoc` on the host:

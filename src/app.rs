@@ -53,7 +53,7 @@ pub enum View {
 
 /// How a diff line should read. Classified once when the diff lands, so
 /// scrolling does not re-parse the patch on every frame.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffKind {
     File,
     Hunk,
@@ -74,6 +74,167 @@ pub struct DiffLine {
 pub enum Row {
     Header(Section, usize),
     File(Section, usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::FileEntry;
+
+    fn file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            action: 'M',
+            size: 0,
+            conflict: false,
+        }
+    }
+
+    /// An app holding one status snapshot and nothing else.
+    fn app_with(staged: &[&str], unmerged: &[&str], unstaged: &[&str]) -> App {
+        let mut app = App::bare(LoreGlobalArgs::default(), String::new());
+        app.status = Some(StatusSnapshot {
+            staged: staged.iter().map(|path| file(path)).collect(),
+            unmerged: unmerged.iter().map(|path| file(path)).collect(),
+            unstaged: unstaged.iter().map(|path| file(path)).collect(),
+            ..Default::default()
+        });
+        app.rebuild_rows();
+        app
+    }
+
+    fn paths(targets: Targets) -> Vec<String> {
+        match targets {
+            Targets::Paths(paths) => paths,
+            Targets::Empty => panic!("expected paths, got Empty"),
+            Targets::Inapplicable => panic!("expected paths, got Inapplicable"),
+        }
+    }
+
+    #[test]
+    fn selection_skips_section_headers() {
+        let app = app_with(&["a.txt"], &[], &["b.txt"]);
+
+        // Row 0 is the "Staged" header, so the cursor starts on the file below.
+        assert!(matches!(app.rows[0], Row::Header(..)));
+        assert_eq!(app.selected_file().map(|(_, path)| path), Some("a.txt"));
+    }
+
+    #[test]
+    fn targets_fall_back_to_the_selection_when_nothing_is_marked() {
+        let app = app_with(&[], &[], &["a.txt", "b.txt"]);
+        assert_eq!(paths(app.targets(&[Section::Unstaged])), ["a.txt"]);
+    }
+
+    #[test]
+    fn targets_reject_a_selection_in_the_wrong_section() {
+        let app = app_with(&["a.txt"], &[], &[]);
+        assert!(matches!(
+            app.targets(&[Section::Unstaged]),
+            Targets::Inapplicable
+        ));
+    }
+
+    #[test]
+    fn targets_are_empty_without_a_selection() {
+        let app = app_with(&[], &[], &[]);
+        assert!(matches!(app.targets(&ALL_SECTIONS), Targets::Empty));
+    }
+
+    #[test]
+    fn marks_win_over_the_selection_and_are_filtered_by_section() {
+        let mut app = app_with(&["staged.txt"], &[], &["unstaged.txt"]);
+        app.marked.insert("staged.txt".into());
+        app.marked.insert("unstaged.txt".into());
+
+        // Staging only applies to what is not staged yet, and unstaging only
+        // to what is — even though both files are marked.
+        assert_eq!(paths(app.targets(&[Section::Unstaged])), ["unstaged.txt"]);
+        assert_eq!(paths(app.targets(&[Section::Staged])), ["staged.txt"]);
+        assert_eq!(
+            paths(app.targets(&ALL_SECTIONS)),
+            ["staged.txt", "unstaged.txt"]
+        );
+    }
+
+    #[test]
+    fn marks_with_nothing_applicable_are_not_silently_empty() {
+        let mut app = app_with(&["staged.txt"], &[], &[]);
+        app.marked.insert("staged.txt".into());
+        assert!(matches!(
+            app.targets(&[Section::Unstaged]),
+            Targets::Inapplicable
+        ));
+    }
+
+    #[test]
+    fn marks_do_not_survive_the_file_they_name() {
+        let mut app = app_with(&[], &[], &["gone.txt", "stays.txt"]);
+        app.marked.insert("gone.txt".into());
+        app.marked.insert("stays.txt".into());
+
+        app.status = Some(StatusSnapshot {
+            unstaged: vec![file("stays.txt")],
+            ..Default::default()
+        });
+        app.rebuild_rows();
+
+        // Otherwise a file reappearing under the same path would arrive marked.
+        assert_eq!(app.marked.len(), 1);
+        assert!(app.marked.contains("stays.txt"));
+    }
+
+    #[test]
+    fn a_moved_file_is_acted_on_by_its_destination() {
+        let app = app_with(&[], &[], &["old.txt -> new.txt"]);
+        assert_eq!(paths(app.targets(&[Section::Unstaged])), ["new.txt"]);
+    }
+
+    #[test]
+    fn diff_lines_are_classified_by_their_prefix() {
+        assert_eq!(classify_diff_line("+added"), DiffKind::Add);
+        assert_eq!(classify_diff_line("-removed"), DiffKind::Delete);
+        assert_eq!(classify_diff_line(" context"), DiffKind::Context);
+        assert_eq!(classify_diff_line("@@ -1,2 +1,3 @@"), DiffKind::Hunk);
+        assert_eq!(classify_diff_line("<<<<<<< ours"), DiffKind::Conflict);
+        assert_eq!(classify_diff_line(">>>>>>> theirs"), DiffKind::Conflict);
+        assert_eq!(classify_diff_line("======="), DiffKind::Conflict);
+
+        // The patch's own file headers start with + and -, and must not read
+        // as an added and a removed line.
+        assert_eq!(classify_diff_line("+++ b/file"), DiffKind::Context);
+        assert_eq!(classify_diff_line("--- a/file"), DiffKind::Context);
+    }
+
+    #[test]
+    fn attribution_is_dropped_when_the_server_does_not_know_who_acted() {
+        assert_eq!(by("alice"), " by alice");
+        assert_eq!(by(""), "");
+        assert_eq!(by("<unknown>"), "");
+    }
+}
+
+/// How one line of a unified diff should read.
+fn classify_diff_line(line: &str) -> DiffKind {
+    if line.starts_with("<<<<<<<")
+        || line.starts_with("|||||||")
+        || line.starts_with("=======")
+        || line.starts_with(">>>>>>>")
+    {
+        DiffKind::Conflict
+    } else if line.starts_with("@@") {
+        DiffKind::Hunk
+    } else if line.starts_with("+++") || line.starts_with("---") {
+        // File headers of the patch itself; the path is already in the heading
+        // above them, so they read as context.
+        DiffKind::Context
+    } else if line.starts_with('+') {
+        DiffKind::Add
+    } else if line.starts_with('-') {
+        DiffKind::Delete
+    } else {
+        DiffKind::Context
+    }
 }
 
 /// Attribution suffix for a notification, omitted when the server does not
@@ -189,9 +350,28 @@ pub struct App {
 
 impl App {
     pub fn new(globals: LoreGlobalArgs, repo_path: String) -> Self {
+        let mut app = Self::bare(globals, repo_path);
+
+        // The first load scans: the dirty flags on disk may predate this
+        // session, and an empty file list that only means "nothing was
+        // flagged" would read as "nothing changed".
+        app.dispatch(Request::Status { scan: true });
+        app.dispatch(Request::History);
+        app.dispatch(Request::Locks);
+        app.dispatch(Request::Branches);
+        app.dispatch(Request::RemoteUrl);
+        app.dispatch(Request::Subscribe {
+            notices: app.notices.clone(),
+        });
+        app
+    }
+
+    /// State with nothing loaded and nothing asked of Lore. `new` builds on
+    /// this, and tests use it to exercise the parts that are pure state.
+    fn bare(globals: LoreGlobalArgs, repo_path: String) -> Self {
         let (tx, rx) = channel();
 
-        let mut app = Self {
+        Self {
             globals,
             repo_path,
             view: View::Status,
@@ -232,20 +412,7 @@ impl App {
             queue: VecDeque::new(),
             tx,
             rx,
-        };
-
-        // The first load scans: the dirty flags on disk may predate this
-        // session, and an empty file list that only means "nothing was
-        // flagged" would read as "nothing changed".
-        app.dispatch(Request::Status { scan: true });
-        app.dispatch(Request::History);
-        app.dispatch(Request::Locks);
-        app.dispatch(Request::Branches);
-        app.dispatch(Request::RemoteUrl);
-        app.dispatch(Request::Subscribe {
-            notices: app.notices.clone(),
-        });
-        app
+        }
     }
 
     pub fn busy(&self) -> bool {
@@ -588,28 +755,8 @@ impl App {
             }
 
             for line in entry.patch.lines() {
-                let kind = if line.starts_with("<<<<<<<")
-                    || line.starts_with("|||||||")
-                    || line.starts_with("=======")
-                    || line.starts_with(">>>>>>>")
-                {
-                    DiffKind::Conflict
-                } else if line.starts_with("@@") {
-                    DiffKind::Hunk
-                } else if line.starts_with("+++") || line.starts_with("---") {
-                    // File headers of the patch itself; the path is already in
-                    // the heading above, so they read as context.
-                    DiffKind::Context
-                } else if line.starts_with('+') {
-                    DiffKind::Add
-                } else if line.starts_with('-') {
-                    DiffKind::Delete
-                } else {
-                    DiffKind::Context
-                };
-
                 lines.push(DiffLine {
-                    kind,
+                    kind: classify_diff_line(line),
                     text: line.to_string(),
                 });
             }

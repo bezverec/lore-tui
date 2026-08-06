@@ -506,14 +506,21 @@ fn tree(
     outcome.into_result(String::new())?;
 
     let names = std::mem::take(&mut *names.lock());
+    Ok(tree_entries(names, at_root))
+}
+
+/// Turn dumped node names into one directory's listing.
+///
+/// At the root every node is a child of the listing. Below it, the dump leads
+/// with the directory itself and prefixes its children with its name, so the
+/// leading segment is dropped and the entry itself falls away with it.
+fn tree_entries(names: Vec<(String, u64)>, at_root: bool) -> Vec<TreeEntry> {
     let mut entries: Vec<TreeEntry> = names
         .into_iter()
         .filter_map(|(name, size)| {
             let directory = name.ends_with('/');
             let name = name.trim_end_matches('/');
 
-            // At the root every node is a child. Below it, the dump leads with
-            // the directory itself and prefixes its children with its name.
             let name = if at_root {
                 name.to_string()
             } else {
@@ -535,7 +542,7 @@ fn tree(
             .cmp(&left.directory)
             .then_with(|| left.name.cmp(&right.name))
     });
-    Ok(entries)
+    entries
 }
 
 /// Revisions in which one file changed. Metadata events follow each entry and
@@ -1410,6 +1417,104 @@ impl Request {
             Request::Push => "push",
             Request::Sync => "sync",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            action: 'M',
+            size: 0,
+            conflict: false,
+        }
+    }
+
+    #[test]
+    fn file_target_is_the_destination_of_a_move() {
+        assert_eq!(entry("notes.txt").target(), "notes.txt");
+        assert_eq!(entry("old.txt -> new.txt").target(), "new.txt");
+        // A path may legitimately contain the separator's characters.
+        assert_eq!(entry("a -> b -> c").target(), "c");
+    }
+
+    #[test]
+    fn root_listing_keeps_every_node() {
+        let entries = tree_entries(
+            vec![
+                ("README.md".into(), 46),
+                ("assets/".into(), 0),
+                ("hello.txt".into(), 22),
+            ],
+            true,
+        );
+
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        // Directories first, then alphabetical.
+        assert_eq!(names, ["assets", "README.md", "hello.txt"]);
+        assert!(entries[0].directory);
+        assert!(!entries[1].directory);
+        assert_eq!(entries[1].size, 46);
+    }
+
+    #[test]
+    fn subdirectory_listing_drops_the_directory_itself() {
+        let entries = tree_entries(
+            vec![
+                // The dump leads with the directory that was asked for.
+                ("assets/".into(), 0),
+                ("assets/textures/".into(), 0),
+                ("assets/notes.txt".into(), 39),
+            ],
+            false,
+        );
+
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["textures", "notes.txt"]);
+        assert!(entries[0].directory);
+    }
+
+    #[test]
+    fn repository_url_joins_without_doubling_the_separator() {
+        assert_eq!(
+            repository_url("lore://host:41337", "repo"),
+            "lore://host:41337/repo"
+        );
+        assert_eq!(
+            repository_url("lore://host:41337/", "repo"),
+            "lore://host:41337/repo"
+        );
+    }
+
+    #[test]
+    fn remote_state_reports_the_most_specific_problem_first() {
+        let mut status = StatusSnapshot {
+            remote_available: true,
+            remote_authorized: true,
+            remote_branch_exist: true,
+            ..Default::default()
+        };
+        assert_eq!(status.remote_state(), "in sync with remote");
+
+        status.local_ahead = true;
+        assert_eq!(status.remote_state(), "ahead of remote");
+
+        status.remote_ahead = true;
+        assert_eq!(status.remote_state(), "diverged from remote");
+
+        status.local_ahead = false;
+        assert_eq!(status.remote_state(), "behind remote");
+
+        // Being unreachable outranks anything the counters say.
+        status.remote_branch_exist = false;
+        assert_eq!(status.remote_state(), "remote branch missing");
+        status.remote_authorized = false;
+        assert_eq!(status.remote_state(), "remote not authorized");
+        status.remote_available = false;
+        assert_eq!(status.remote_state(), "remote unavailable");
     }
 }
 
