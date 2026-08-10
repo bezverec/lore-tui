@@ -17,7 +17,9 @@ path = "src/main.rs"
 lore = { git = "https://github.com/EpicGames/lore", rev = "695630be887f78531e088520acd128f3aa22ddd4" }
 chrono = { version = "0.4", default-features = false, features = ["alloc", "clock"] }
 parking_lot = "0.12"
-ratatui = "0.29"
+# 0.30 rather than 0.29: the older line pulls lru 0.12, which carries
+# GHSA-rhfx-m35p-ff5j. Nothing in this crate needed changing for the bump.
+ratatui = "0.30"
 
 # Lore builds its transport against a vendored fork of quinn-proto. A `[patch]`
 # in a dependency's own workspace does not carry over to whoever depends on it,

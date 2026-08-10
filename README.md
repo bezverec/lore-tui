@@ -192,6 +192,26 @@ If the Lore server also runs in Docker, put the container on the same network (`
 See [docs/architecture.md](docs/architecture.md) for the event model, the threading, and the
 Lore behaviours worth knowing about before extending this.
 
+## Known advisories
+
+Three advisories come with the Lore dependency tree and cannot be resolved here. They are
+listed so nobody has to work that out from a dependency scanner:
+
+| Crate | Advisory | Why it cannot be fixed in this repository |
+| --- | --- | --- |
+| `quinn-proto` 0.11.13 | GHSA-6xvm-j4wr-6v98, GHSA-4w2j-m93h-cj5j | Lore pins it exactly (`=0.11.13`) *and* replaces it with a vendored fork. A `[patch]` to 0.11.15 fails to resolve against the exact requirement. |
+| `jsonwebtoken` 9.3.1 | GHSA-h395-gr6q-cpjc | Fixed in 10.3.0; Lore requires 9.x. |
+| `opentelemetry_sdk` 0.31.0 | GHSA-w9wp-h8wv-79jx | Fixed in 0.32.1; Lore requires 0.31, and for a 0.x crate that is a breaking bump. |
+
+Moving the pinned Lore revision forward does not help — upstream `main` carries the same
+versions. The fixes have to land in Lore first.
+
+What they mean for a client: the `quinn-proto` issues are denial of service and memory
+exhaustion in the QUIC transport, reachable by a server you connect to, not remote code
+execution. The `jsonwebtoken` type confusion affects the side that *validates* tokens, which
+is the server. Telemetry is off in the client. None of this is a reason to be relaxed about
+them, but they are inherited rather than introduced here.
+
 ## License
 
 MIT, matching upstream Lore. See [LICENSE](LICENSE).
