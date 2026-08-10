@@ -86,7 +86,7 @@ events of whatever is running.
 | `o` / `t` / `x` | conflict: keep mine / take theirs / accept the file as it is |
 | `A` | abort the merge in progress |
 | `j` `k` `↑` `↓`, `g` `G`, `PgUp` `PgDn` | move the selection |
-| `space` | mark the file for the next stage, unstage or diff |
+| `space` | mark the file for the next action that takes files |
 | `d` | diff: the marked files in status, the selected revision in history |
 | `h` | the revisions that touched the selected file |
 | `t` | history: browse the files of the selected revision |
@@ -98,9 +98,9 @@ events of whatever is running.
 | `D` | throw away local changes to the marked files, or the selected one |
 | `p` | push to the remote |
 | `y` | sync to the branch tip |
-| `r` | refresh the status, or the repository list in the browser |
+| `r` | refresh the list in view: status and locks, branches, or repositories |
 | `R` | refresh the history |
-| `esc` | clear the marks, or dismiss the status message |
+| `esc` | leave a diff or tree, clear the marks, or dismiss the status message |
 | `?` | key help |
 | `q`, `ctrl-c` | quit |
 
